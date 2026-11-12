@@ -207,6 +207,7 @@ static const char HELP[] =
     "SITE TITLES      installed applications: id medium product code\n"
     "SITE LAUNCH <id> Relay app only: arm broadcast, start the title\n"
     "SITE PLAY        plugin only: leave the plugin screen, boot the game\n"
+    "SITE SYNC | SITE INBOX | SITE UPDATE  Relay app only: the menu rows, result in SITE LOG\n"
     "SITE REBOOT | SITE POWEROFF\n"
     "STOR /install/<name>.cia  Relay app only: installs, nothing written to the card";
 
@@ -222,6 +223,13 @@ static int site(char *arg, char *out, size_t cap) {
     if (!strcasecmp(arg, "LAUNCH")) return site_launch(rest, out, cap);
     if (!strcasecmp(arg, "REBOOT")) return request(SITE_REBOOT, "Rebooting", out, cap);
     if (!strcasecmp(arg, "POWEROFF")) return request(SITE_POWEROFF, "Powering off", out, cap);
+    if (!strcasecmp(arg, "SYNC") || !strcasecmp(arg, "INBOX") || !strcasecmp(arg, "UPDATE")) {
+        if (!is_app) { snprintf(out, cap, "In a game; needs the Relay app"); return 550; }
+        site_req_t r = !strcasecmp(arg, "SYNC") ? SITE_SYNC : !strcasecmp(arg, "INBOX") ? SITE_INBOX : SITE_UPDATE;
+        __atomic_store_n(&pending, r, __ATOMIC_RELEASE);
+        snprintf(out, cap, "Started; SITE LOG shows the result");
+        return 200;
+    }
     if (!strcasecmp(arg, "PLAY")) {
         if (is_app) { snprintf(out, cap, "Not in a game; SITE LAUNCH <id>"); return 550; }
         return request(SITE_PLAY, "Booting the game", out, cap);
@@ -233,11 +241,8 @@ static int site(char *arg, char *out, size_t cap) {
 
 typedef struct { Handle h; u64 off; } cia_t;
 
-static int sink_open(const char *abs, void **ctx, const char **err) {
-    size_t n = strlen(abs);
-    if (strncmp(abs, "/install/", 9) || n < 13 || strcasecmp(abs + n - 4, ".cia")) return 0;
-    if (!is_app) { *err = "Install from the Relay app, not in a game"; return -1; }
-    if (R_FAILED(amInit())) { *err = "AM unavailable"; return -1; }
+void *cia_begin(const char **err) {
+    if (R_FAILED(amInit())) { *err = "AM unavailable"; return NULL; }
     cia_t *c = calloc(1, sizeof(*c));
     Result r = c ? AM_StartCiaInstall(MEDIATYPE_SD, &c->h) : -1;
     if (R_FAILED(r)) {
@@ -245,13 +250,19 @@ static int sink_open(const char *abs, void **ctx, const char **err) {
         amExit();
         ftp_log("AM_StartCiaInstall %08lX", r);
         *err = "Installer refused to start";
-        return -1;
+        return NULL;
     }
-    *ctx = c;
-    return 1;
+    return c;
 }
 
-static int sink_write(void *ctx, const void *p, size_t n) {
+static int sink_open(const char *abs, void **ctx, const char **err) {
+    size_t n = strlen(abs);
+    if (strncmp(abs, "/install/", 9) || n < 13 || strcasecmp(abs + n - 4, ".cia")) return 0;
+    if (!is_app) { *err = "Install from the Relay app, not in a game"; return -1; }
+    return (*ctx = cia_begin(err)) ? 1 : -1;
+}
+
+int cia_write(void *ctx, const void *p, size_t n) {
     cia_t *c = ctx;
     u32 written = 0;
     Result r = FSFILE_Write(c->h, &written, c->off, p, n, 0);
@@ -261,7 +272,7 @@ static int sink_write(void *ctx, const void *p, size_t n) {
 }
 
 /* AM takes the handle on finish and on cancel. */
-static const char *sink_close(void *ctx, int ok) {
+const char *cia_end(void *ctx, int ok) {
     static char why[48];
     cia_t *c = ctx;
     Result r = ok ? AM_FinishCiaInstall(c->h) : AM_CancelCIAInstall(c->h);
@@ -275,7 +286,7 @@ static const char *sink_close(void *ctx, int ok) {
     return NULL;
 }
 
-static const ftp_hooks_t hooks = { site, sink_open, sink_write, sink_close };
+static const ftp_hooks_t hooks = { site, sink_open, cia_write, cia_end };
 
 void site_init(bool app) {
     is_app = app;

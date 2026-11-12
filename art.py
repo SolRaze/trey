@@ -1,68 +1,30 @@
 #!/usr/bin/env python3
-"""Draws the Relay icon (48x48), HOME Menu banner (256x128) and a silent banner sound.
+"""Renders the Relay HOME Menu icon (48x48, from a 192 render) and banner (256x128), and writes a silent banner sound.
 
   python3 art.py        writes app/resources/icon.png, banner.png, silence.wav
 
-The mark: one point with two arcs opening right, the signal leaving the console.
-Matte near-black field, white mark, same colours as the launcher screens.
+Icon and banner come from the Steam art page, Code/atlas/steam/art/art.html (kinds ctricon,
+ctrbanner, app relay, theme mono), so the CIA and the Steam shortcut share one mark. It renders in
+steam-headless on knave, the only chromium with the page's font; knave must be up.
 """
-import math
 import struct
-import zlib
+import subprocess
 from pathlib import Path
 
-BG = (12, 12, 14)
-INK = (236, 236, 238)
-SS = 4  # supersampling per axis
-
 OUT = Path(__file__).resolve().parent / "app" / "resources"
+ART = "/srv/steam/mac/art/art.html"   # live copy inside steam-headless, host /mnt/bak/Games/steam/mac/art
 
 
-def coverage(w, h, inside):
-    """Fraction of each pixel covered by the shape, sampled SS x SS."""
-    cov = []
-    for y in range(h):
-        row = []
-        for x in range(w):
-            hit = 0
-            for sy in range(SS):
-                for sx in range(SS):
-                    if inside(x + (sx + 0.5) / SS, y + (sy + 0.5) / SS):
-                        hit += 1
-            row.append(hit / (SS * SS))
-        cov.append(row)
-    return cov
-
-
-def mark(cx, cy, unit):
-    """Point at (cx, cy), arcs of radius 2u and 3.4u, stroke 0.7u, 100 degrees wide."""
-    dot = unit * 0.85
-    arcs = [(unit * 2.0, unit * 0.7), (unit * 3.4, unit * 0.7)]
-    half = math.radians(50)
-
-    def inside(x, y):
-        dx, dy = x - cx, y - cy
-        r = math.hypot(dx, dy)
-        if r <= dot:
-            return True
-        if dx <= 0 or abs(math.atan2(dy, dx)) > half:
-            return False
-        return any(abs(r - ar) <= sw / 2 for ar, sw in arcs)
-
-    return inside
-
-
-def png(path, w, h, cov):
-    raw = b""
-    for row in cov:
-        raw += b"\x00" + bytes(
-            round(BG[c] + (INK[c] - BG[c]) * a) for a in row for c in range(3))
-    def chunk(tag, data):
-        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
-    path.write_bytes(b"\x89PNG\r\n\x1a\n"
-                     + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
-                     + chunk(b"IDAT", zlib.compress(raw, 9))
-                     + chunk(b"IEND", b""))
+def render(kind, w, h, name):
+    shot = f"/tmp/relay-{name}"
+    cmd = (f"HOME=/tmp chromium --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=1 "
+           f"--default-background-color=000000ff --virtual-time-budget=3000 --window-size={w},{h} "
+           f"--screenshot={shot} 'file://{ART}#{kind},{w},{h},mono,relay' 2>/dev/null; cat {shot}")
+    data = subprocess.run(["ssh", "knave", "docker", "exec", "steam-headless", "sh", "-c", f'"{cmd}"'],
+                          capture_output=True, check=True).stdout
+    if not data.startswith(b"\x89PNG"):
+        raise SystemExit(f"{kind}: no PNG back from knave")
+    (OUT / name).write_bytes(data)
 
 
 def silence(path, seconds=0.5, rate=22050):
@@ -75,10 +37,12 @@ def silence(path, seconds=0.5, rate=22050):
 
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
-    # Icon: mark optically centred, the arcs carry more weight than the point.
-    png(OUT / "icon.png", 48, 48, coverage(48, 48, mark(15, 24, 5.6)))
-    # Banner: shown as a flat card on the HOME Menu top screen, mark at its centre.
-    png(OUT / "banner.png", 256, 128, coverage(256, 128, mark(112, 64, 13)))
+    render("ctricon", 192, 192, "icon-192.png")
+    # shrunk smooth: the handheld's outlines and faces drawn at 48 directly turn to mush
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", OUT / "icon-192.png",
+                    "-vf", "scale=48:48:flags=lanczos", OUT / "icon.png"], check=True)
+    (OUT / "icon-192.png").unlink()
+    render("ctrbanner", 256, 128, "banner.png")
     silence(OUT / "silence.wav")
 
 

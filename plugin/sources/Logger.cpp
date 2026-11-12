@@ -35,7 +35,7 @@ void Logger::Raw(bool isTopScr, const char* fmt, ...) {
     va_start(valist, fmt);
     int ret = vsnprintf(buffer, 255, fmt, valist);
     va_end(valist);
-    if (ret >= 0) buffer[ret] = '\0';
+    if (ret >= 0) buffer[ret < 255 ? ret : 255] = '\0';
     {
         CTRPluginFramework::Lock l(pendingLogsMutex);
         pendingLogs.push(PendingLog{.type = PendingLog::Type::RAW, .isTopScr = isTopScr, .string{buffer}});
@@ -49,7 +49,7 @@ void Logger::Info(const char* fmt, ...) {
     va_start(valist, fmt);
     int ret = vsnprintf(buffer, 255, fmt, valist);
     va_end(valist);
-    if (ret >= 0) buffer[ret] = '\0';
+    if (ret >= 0) buffer[ret < 255 ? ret : 255] = '\0';
     {
         CTRPluginFramework::Lock l(pendingLogsMutex);
         pendingLogs.push(PendingLog{.type = PendingLog::Type::INFO, .isTopScr = true, .string{buffer}});
@@ -65,7 +65,7 @@ void Logger::Debug(const char* fmt, ...) {
     va_start(valist, fmt);
     int ret = vsnprintf(buffer, 255, fmt, valist);
     va_end(valist);
-    if (ret >= 0) buffer[ret] = '\0';
+    if (ret >= 0) buffer[ret < 255 ? ret : 255] = '\0';
     {
         CTRPluginFramework::Lock l(pendingLogsMutex);
         pendingLogs.push(PendingLog{.type = PendingLog::Type::DEBUG, .isTopScr = true, .string{buffer}});
@@ -79,7 +79,7 @@ void Logger::Warning(const char* fmt, ...) {
     va_start(valist, fmt);
     int ret = vsnprintf(buffer, 255, fmt, valist);
     va_end(valist);
-    if (ret >= 0) buffer[ret] = '\0';
+    if (ret >= 0) buffer[ret < 255 ? ret : 255] = '\0';
     {
         CTRPluginFramework::Lock l(pendingLogsMutex);
         pendingLogs.push(PendingLog{.type = PendingLog::Type::WARNING, .isTopScr = true, .string{buffer}});
@@ -94,7 +94,7 @@ void Logger::Error(const char* fmt, ...) {
     va_start(valist, fmt);
     int ret = vsnprintf(buffer, 255, fmt, valist);
     va_end(valist);
-    if (ret >= 0) buffer[ret] = '\0';
+    if (ret >= 0) buffer[ret < 255 ? ret : 255] = '\0';
     {
         CTRPluginFramework::Lock l(pendingLogsMutex);
         pendingLogs.push(PendingLog{.type = PendingLog::Type::ERROR, .isTopScr = true, .string{buffer}});
@@ -109,7 +109,7 @@ void Logger::Traffic(const char* fmt, ...) {
     va_start(valist, fmt);
     int ret = vsnprintf(buffer, 255, fmt, valist);
     va_end(valist);
-    if (ret >= 0) buffer[ret] = '\0';
+    if (ret >= 0) buffer[ret < 255 ? ret : 255] = '\0';
     {
         CTRPluginFramework::Lock l(pendingLogsMutex);
         pendingLogs.push(PendingLog{.type = PendingLog::Type::TRAFFIC, .isTopScr = false, .string{buffer}});

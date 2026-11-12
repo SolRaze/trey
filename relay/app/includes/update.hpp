@@ -15,5 +15,8 @@ UpdateResult checkUpdate(char* msg, size_t cap);
 // Streams a CIA from url into the SD installer; never commits a partial one. msg says why on false.
 bool installCia(const char* url, char* msg, size_t cap);
 
+// Same, from a file on the card.
+bool installCiaFile(const char* path, char* msg, size_t cap);
+
 // checkUpdate, then on Newer streams relay.cia into the installer. Blocks for the download.
 UpdateResult runUpdate(char* msg, size_t cap);

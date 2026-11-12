@@ -1,19 +1,17 @@
 trey
 
-Old 3DS on Luma3DS driven from a Mac | Relay app on the console | Azahar on a Linux box streams its games
+Old 3DS on Luma3DS driven from a Mac | Relay app on the console | Azahar streams its games over Artic Base
 
 contents
 - relay/ console app + Luma plugin, fork of ArticBaseServer | FTP server, SITE commands, CIA install, save sync, updates from this repo's releases
-- relay/knave.py/ box side over plain HTTP | save sync with Azahar, CIA inbox, Azahar wake | `relay-knave.service`
 - trey/ Mac CLI | files over FTP | SITE commands | screenshots | CIA install | 3dslink | input over Rosalina InputRedirection | `trey --help`
-- bottom.py/ Azahar's bottom screen to a tablet while a game runs | touches back as clicks
 - flac-scan.py/ FLAC on the card above 16-bit 48 kHz, the Old 3DS limit
 
 relay
-rows | Broadcast a game | Sync saves | Install from knave | Update | Theme | Exit
-- broadcast/ arms the Artic Base plugin, wakes Azahar on the box, pick the game on HOME
-- sync/ every installed app's save both ways with Azahar | last synced hash per title in `sdmc:/3ds/relay/sync` | one side changed = it wins | both changed = console wins | replaced copy kept on the box
-- inbox/ installs every CIA in the box's `/srv/relay/inbox`, moves each to `done`
+rows | Broadcast a game | Sync saves | Install from inbox | Update | Theme | Exit
+- broadcast/ arms the Artic Base plugin | connect from Azahar, pick the game on HOME
+- sync/ every installed app's save both ways with `sdmc:/3ds/relay/saves/<TID>.sav` | last synced hash per title in `sdmc:/3ds/relay/sync` | one side changed = it wins | both changed = console wins | replaced copy kept in `saves/old` | computer side `trey saves pull|push`
+- inbox/ installs every CIA in `sdmc:/3ds/relay/inbox`, moves each to `done` | drop files there over FTP or on the card
 - update/ latest release of this repo, `build` + `relay.cia` | checked at launch | installs only a newer stamp
 - https/ libcurl + mbedTLS, roots embedded at build | the console's own TLS fails GitHub's handshake
 - build/ devkitPro 3ds-dev + 3ds-curl | `3gxtool` `bannertool` `makerom` on PATH | `make -C relay` | `make -C relay release` uploads

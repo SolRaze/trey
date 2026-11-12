@@ -9,6 +9,8 @@
   trey site <verb> [args]        relay SITE command: help stat shot log light titles launch play reboot poweroff
   trey shot [dir]                relay screenshot of both screens as PNG, default /tmp
   trey install <file.cia>        relay app only: stream into the installer, no FBI
+  trey saves pull|push [dir]     save copies in /3ds/relay/saves <-> dir, default ./saves
+                                 pull after Sync saves; push runs Sync saves on the console after
   trey run <app.3dsx> [args]     send and start; Homebrew Launcher must be on its Y netloader screen
   trey press <btn>... [-t ms]    tap buttons together: a b x y l r up down left right start select
                                  refuses START while ftpd answers (START quits ftpd); -f overrides
@@ -28,6 +30,7 @@ import time
 HOST = os.environ.get("TREY_HOST", "5.0.0.8")
 FTP = f"ftp://{HOST}:5000"
 IR_PORT = 4950
+SAVES = "/3ds/relay/saves"
 
 # HID bit per button; InputRedirection takes the pad word active-low (0xfff = nothing held).
 BUTTONS = {"a": 0, "b": 1, "select": 2, "start": 3, "right": 4, "left": 5,
@@ -116,6 +119,14 @@ def main(argv):
         return 0
     if cmd == "install":
         return lftp(f"put {q(args[0])} -o {q('/install/' + os.path.basename(args[0]))}")
+    if cmd == "saves" and args and args[0] in ("pull", "push"):
+        local = args[1] if len(args) > 1 else "saves"
+        if args[0] == "pull":
+            return lftp(f"mirror {q(SAVES)} {q(local)}")
+        rc = lftp(f"mirror -R --no-recursion -I '*.sav' {q(local)} {q(SAVES)}")
+        if rc == 0:
+            print(site("SYNC"))
+        return rc
     if cmd == "ftp":
         return lftp(" ".join(args))
     if cmd == "run":

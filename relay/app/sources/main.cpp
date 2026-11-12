@@ -7,7 +7,7 @@
 #include <string.h>
 
 #include "arm.hpp"
-#include "knave.hpp"
+#include "inbox.hpp"
 #include "net.hpp"
 #include "saves.hpp"
 #include "update.hpp"
@@ -17,7 +17,7 @@
 #define SOC_ALIGN      0x1000
 #define SOC_BUFFERSIZE 0x100000
 
-// Themes match the Steam art's (Code/atlas/steam/art/art.html). mono: matte near-black field, white
+// Themes. mono: matte near-black field, white
 // type, one pale accent for live, red only for faults. memcard: case's lit grey field, light grey
 // type with a black border, yellow titles, PS2 browser menu: selected row sky blue, the rest grey, both
 // black-bordered (blue sampled from ~/Reference/screens/ps2/delete.mp4).
@@ -70,7 +70,7 @@ static const int MARGIN = 24;
 // Touch hits the whole row.
 static const int ROW_TOP = 8, ROW_H = 28, DESC_Y = 182;
 enum { ITEM_BROADCAST, ITEM_SYNC, ITEM_INBOX, ITEM_UPDATE, ITEM_THEME, ITEM_EXIT, ITEM_COUNT };
-static const char* ITEM_TITLE[] = { "Broadcast a game", "Sync saves", "Install from knave", "Update", "Theme", "Exit" };
+static const char* ITEM_TITLE[] = { "Broadcast a game", "Sync saves", "Install from inbox", "Update", "Theme", "Exit" };
 static int rowY(int i) { return ROW_TOP + i * ROW_H; }
 
 static C2D_TextBuf textBuf;
@@ -224,11 +224,11 @@ int main(int argc, char* argv[]) {
     Screen s;
     int theme = loadTheme();
     T = &THEMES[theme];
-    char syncMsg[96] = "Both ways with Azahar on knave";
-    char inboxMsg[96] = "Installs CIAs from knave's inbox";
+    char syncMsg[96] = "Both ways with /3ds/relay/saves";
+    char inboxMsg[96] = "Installs CIAs in /3ds/relay/inbox";
     char updateMsg[96] = "Checks GitHub for a newer build";
     char themeMsg[48];
-    // Network jobs block: the row shows its "working" line for one frame, the job runs on the next.
+    // Jobs block: the row shows its "working" line for one frame, the job runs on the next.
     enum class Job { None, Sync, Inbox, Update, Check } job = Job::None;
     bool checked = false;   // the launch-time update check, once Wi-Fi is up
     void* socBuffer = memalign(SOC_ALIGN, SOC_BUFFERSIZE);
@@ -275,12 +275,12 @@ int main(int argc, char* argv[]) {
         if (job != Job::None) {
             Job j = job;
             job = Job::None;
-            if (!netUp) {
-                snprintf(j == Job::Sync ? syncMsg : j == Job::Inbox ? inboxMsg : updateMsg, 96, "HTTP service unavailable");
-            } else if (j == Job::Sync) {
+            if (j == Job::Sync) {
                 syncSaves(syncMsg, sizeof(syncMsg));
             } else if (j == Job::Inbox) {
                 installInbox(inboxMsg, sizeof(inboxMsg));
+            } else if (!netUp) {
+                snprintf(updateMsg, sizeof(updateMsg), "HTTP service unavailable");
             } else if (j == Job::Check) {
                 checkUpdate(updateMsg, sizeof(updateMsg));
                 ftp_log("update check: %s", updateMsg);
@@ -299,18 +299,18 @@ int main(int argc, char* argv[]) {
         if (req == SITE_INBOX) activate = ITEM_INBOX;
         if (req == SITE_UPDATE) activate = ITEM_UPDATE;
         if (activate == ITEM_SYNC) { snprintf(syncMsg, sizeof(syncMsg), "Syncing saves"); job = Job::Sync; }
-        if (activate == ITEM_INBOX) { snprintf(inboxMsg, sizeof(inboxMsg), "Installing from knave"); job = Job::Inbox; }
+        if (activate == ITEM_INBOX) { snprintf(inboxMsg, sizeof(inboxMsg), "Installing from inbox"); job = Job::Inbox; }
         if (activate == ITEM_UPDATE) { snprintf(updateMsg, sizeof(updateMsg), "Checking GitHub"); job = Job::Update; }
         if (activate == ITEM_BROADCAST) {
             s.fault = armBroadcast();
-            if (!s.fault) { s.state = State::Armed; if (netUp) wakeAzahar(); }
+            if (!s.fault) s.state = State::Armed;
             ftp_log("arm: %s", s.fault ? s.fault : "ok");
         }
         if (req == SITE_LAUNCH) {
             // On exit libctru jumps to the chainload title, with the plugin armed for it.
             s.fault = armBroadcast();
             ftp_log("arm: %s", s.fault ? s.fault : "ok");
-            if (!s.fault) { if (netUp) wakeAzahar(); aptSetChainloader(title, media); quit = true; }
+            if (!s.fault) { aptSetChainloader(title, media); quit = true; }
         } else if (req == SITE_REBOOT || req == SITE_POWEROFF) {
             svcSleepThread(300000000LL);  // the 200 reply leaves before the network goes
             site_power(req);
@@ -333,7 +333,7 @@ int main(int argc, char* argv[]) {
         C2D_TextBufClear(textBuf);
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
         snprintf(themeMsg, sizeof(themeMsg), "%s, A for the next", T->name);
-        const char* sub[ITEM_COUNT] = { "Arms Artic Base, wakes Azahar", syncMsg, inboxMsg,
+        const char* sub[ITEM_COUNT] = { "Arms Artic Base for Azahar", syncMsg, inboxMsg,
                                         updateMsg, themeMsg, "Stops FTP" };
         C2D_TargetClear(top, T->field[0]);
         C2D_SceneBegin(top);

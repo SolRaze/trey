@@ -11,9 +11,8 @@
 bool netInit() { return curl_global_init(CURL_GLOBAL_DEFAULT) == CURLE_OK; }
 void netExit() { curl_global_cleanup(); }
 
-// "knave" for ours, else the host name, for screen messages.
+// Host name of url, for screen messages.
 static void hostOf(const char* url, char* out, size_t cap) {
-    if (!strncmp(url, KNAVE, strlen(KNAVE))) { snprintf(out, cap, "knave"); return; }
     const char* h = strstr(url, "://");
     h = h ? h + 3 : url;
     snprintf(out, cap, "%.*s", (int)strcspn(h, "/:"), h);
@@ -101,23 +100,6 @@ bool netStream(const char* url, bool (*sink)(void*, const void*, size_t), void* 
     curl_easy_setopt(c, CURLOPT_WRITEDATA, &s);
     // curl fails a body shorter than its Content-Length (CURLE_PARTIAL_FILE), so ok means complete.
     bool ok = perform(c, url, nullptr, msg, cap);
-    curl_easy_cleanup(c);
-    return ok;
-}
-
-static size_t discard(char*, size_t sz, size_t nm, void*) { return sz * nm; }
-
-bool netSend(const char* method, const char* url, const void* body, u32 len, char* msg, size_t cap) {
-    CURL* c = easy(url);
-    if (!c) { snprintf(msg, cap, "Out of memory"); return false; }
-    curl_easy_setopt(c, CURLOPT_CUSTOMREQUEST, method);
-    curl_easy_setopt(c, CURLOPT_POSTFIELDS, body ? body : "");
-    curl_easy_setopt(c, CURLOPT_POSTFIELDSIZE, (long)len);
-    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, discard);
-    struct curl_slist* h = curl_slist_append(nullptr, "Content-Type: application/octet-stream");
-    curl_easy_setopt(c, CURLOPT_HTTPHEADER, h);
-    bool ok = perform(c, url, nullptr, msg, cap);
-    curl_slist_free_all(h);
     curl_easy_cleanup(c);
     return ok;
 }

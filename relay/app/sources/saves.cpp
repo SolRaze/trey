@@ -9,15 +9,18 @@
 #include <algorithm>
 
 #include "ftp.h"
-#include "net.hpp"
 #include "saves.hpp"
 
-// Two-way save sync with Azahar on knave (knave.py, /saves). Pack form and hash match knave.py.
-// sdmc:/3ds/relay/sync/<tid> holds the hash both sides had after the last sync, so each side's change
+// Two-way save sync between each title's save and its packed copy on the card,
+// sdmc:/3ds/relay/saves/<TID>.sav, which a computer reads and writes over FTP (`trey saves`).
+// sdmc:/3ds/relay/sync/<TID> holds the hash both sides had after the last sync, so each side's change
 // since then is known: one side changed = that side wins; both changed, or never synced = the console
-// wins. Whatever gets replaced is kept on knave first (/srv/relay/saves/<tid>).
+// wins. Whatever gets replaced is kept first as saves/old/<TID>.sav, one copy per title.
+// Pack form: per file u16 path length, path, u32 size, data, all little-endian, sorted by path; u16 0 ends.
+// Hash: 64-bit FNV-1a of the whole pack.
 
 static const char* STATE_DIR = "sdmc:/3ds/relay/sync";
+static const char* STORE_DIR = "sdmc:/3ds/relay/saves";
 
 struct SaveFile { std::string path; std::vector<u8> data; };
 
@@ -175,6 +178,31 @@ static void setLast(u64 tid, u64 h) {
     if (f) { fprintf(f, "%016llx\n", h); fclose(f); }
 }
 
+static bool readFile(const char* path, std::vector<u8>& out) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return false;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    out.resize(n < 0 ? 0 : n);
+    bool ok = n >= 0 && fread(out.data(), 1, out.size(), f) == out.size();
+    fclose(f);
+    return ok;
+}
+
+// Written beside the target, then renamed over it: an FTP client never sees half a file.
+static bool writeFile(const char* path, const std::vector<u8>& b) {
+    char tmp[96];
+    snprintf(tmp, sizeof(tmp), "%s.part", path);
+    FILE* f = fopen(tmp, "wb");
+    if (!f) return false;
+    bool ok = fwrite(b.data(), 1, b.size(), f) == b.size();
+    ok = fclose(f) == 0 && ok;
+    remove(path);
+    if (!ok || rename(tmp, path)) { remove(tmp); return false; }
+    return true;
+}
+
 enum class Outcome { Same, Pushed, Pulled, NoSave, Failed };
 
 static Outcome syncOne(u64 tid, FS_MediaType media) {
@@ -188,46 +216,38 @@ static Outcome syncOne(u64 tid, FS_MediaType media) {
     std::vector<u8> local = pack(files);
     u64 lh = fnv(local), last = lastHash(tid);
 
-    char url[96], msg[96];
-    snprintf(url, sizeof(url), KNAVE "saves/%016llx/hash", tid);
-    u32 len = 0, status = 0;
-    u8* rb = netGetAll(url, &len, &status, msg, sizeof(msg));
-    if (!rb && status != 404) { ftp_log("save %016llX: %s", tid, msg); return Outcome::Failed; }
-    bool have = rb != nullptr;   // Azahar has a save
-    u64 rh = have ? strtoull((char*)rb, nullptr, 16) : 0;
-    free(rb);
+    char store[64], old[64];
+    snprintf(store, sizeof(store), "%s/%016llX.sav", STORE_DIR, tid);
+    snprintf(old, sizeof(old), "%s/old/%016llX.sav", STORE_DIR, tid);
+    std::vector<u8> remote;
+    bool have = readFile(store, remote);
+    u64 rh = have ? fnv(remote) : 0;
 
     if (have && rh == lh) { if (last != lh) setLast(tid, lh); return Outcome::Same; }
-    snprintf(url, sizeof(url), KNAVE "saves/%016llx", tid);
-    bool pull = have && lh == last && rh != last;   // only Azahar's side moved
+    bool pull = have && lh == last && rh != last;   // only the card copy moved
     if (!pull) {
-        if (!netSend("PUT", url, local.data(), local.size(), msg, sizeof(msg))) {
-            ftp_log("save %016llX push: %s", tid, msg);
-            return Outcome::Failed;
-        }
+        if (have && rh != last && !writeFile(old, remote)) { ftp_log("save %016llX: backup failed", tid); return Outcome::Failed; }
+        if (!writeFile(store, local)) { ftp_log("save %016llX: write failed", tid); return Outcome::Failed; }
         setLast(tid, lh);
-        ftp_log("save %016llX pushed", tid);
+        ftp_log("save %016llX sent", tid);
         return Outcome::Pushed;
     }
-    // Pull: the console's copy goes to knave's backups before it is replaced.
-    char bu[96];
-    snprintf(bu, sizeof(bu), KNAVE "saves/%016llx/backup", tid);
-    if (!netSend("PUT", bu, local.data(), local.size(), msg, sizeof(msg))) {
-        ftp_log("save %016llX backup: %s", tid, msg);
+    std::vector<SaveFile> in;
+    if (!writeFile(old, local)) { ftp_log("save %016llX: backup failed", tid); return Outcome::Failed; }
+    if (!unpack(remote.data(), remote.size(), in) || !writeSave(tid, media, in)) {
+        ftp_log("save %016llX: restore failed", tid);
         return Outcome::Failed;
     }
-    u8* pk = netGetAll(url, &len, &status, msg, sizeof(msg));
-    std::vector<SaveFile> in;
-    bool ok = pk && unpack(pk, len, in) && fnv(std::vector<u8>(pk, pk + len)) == rh && writeSave(tid, media, in);
-    free(pk);
-    if (!ok) { ftp_log("save %016llX pull failed", tid); return Outcome::Failed; }
     setLast(tid, rh);
-    ftp_log("save %016llX pulled", tid);
+    ftp_log("save %016llX restored", tid);
     return Outcome::Pulled;
 }
 
 bool syncSaves(char* msg, size_t cap) {
     if (R_FAILED(amInit())) { snprintf(msg, cap, "AM unavailable"); return false; }
+    mkdir("sdmc:/3ds/relay", 0777);
+    mkdir(STORE_DIR, 0777);
+    mkdir((std::string(STORE_DIR) + "/old").c_str(), 0777);
     int pushed = 0, pulled = 0, same = 0, failed = 0;
     static const FS_MediaType media[] = { MEDIATYPE_SD, MEDIATYPE_GAME_CARD };
     for (FS_MediaType m : media) {
@@ -247,7 +267,7 @@ bool syncSaves(char* msg, size_t cap) {
         }
     }
     amExit();
-    snprintf(msg, cap, "%d sent, %d received, %d same%s", pushed, pulled, same,
+    snprintf(msg, cap, "%d saved, %d restored, %d same%s", pushed, pulled, same,
              failed ? ", some failed, see log" : "");
     ftp_log("saves: %s", msg);
     return !failed;

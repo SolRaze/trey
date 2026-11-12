@@ -53,19 +53,40 @@ static bool ciaSink(void* ud, const void* p, size_t n) {
     return true;
 }
 
-bool installCia(const char* url, char* msg, size_t cap) {
+// Runs fill (which feeds ciaSink) into a fresh SD install; commits only when fill and every write succeed.
+static bool installWith(bool (*fill)(const char* src, CiaBuf* b, char* msg, size_t cap), const char* src,
+                        char* msg, size_t cap) {
     CiaBuf b = { nullptr, (u8*)malloc(CIA_CHUNK), 0 };
     if (!b.buf) { snprintf(msg, cap, "Out of memory"); return false; }
     const char* err = nullptr;
     b.cia = cia_begin(&err);
     if (!b.cia) { free(b.buf); snprintf(msg, cap, "%s", err); return false; }
-    bool ok = netStream(url, ciaSink, &b, msg, cap);   // never commits a partial CIA
+    bool ok = fill(src, &b, msg, cap);
     if (ok && b.n && !cia_write(b.cia, b.buf, b.n)) { ok = false; snprintf(msg, cap, "Install write failed"); }
     free(b.buf);
     err = cia_end(b.cia, ok);
     if (ok && err) snprintf(msg, cap, "%s", err);
     return ok && !err;
 }
+
+static bool fillUrl(const char* url, CiaBuf* b, char* msg, size_t cap) {
+    return netStream(url, ciaSink, b, msg, cap);
+}
+
+static bool fillFile(const char* path, CiaBuf* b, char* msg, size_t cap) {
+    FILE* f = fopen(path, "rb");
+    if (!f) { snprintf(msg, cap, "Cannot open"); return false; }
+    static u8 chunk[CIA_CHUNK];
+    bool ok = true;
+    for (size_t n; ok && (n = fread(chunk, 1, sizeof(chunk), f)) > 0;)
+        if (!ciaSink(b, chunk, n)) { ok = false; snprintf(msg, cap, "Install write failed"); }
+    if (ok && ferror(f)) { ok = false; snprintf(msg, cap, "Read failed"); }
+    fclose(f);
+    return ok;
+}
+
+bool installCia(const char* url, char* msg, size_t cap) { return installWith(fillUrl, url, msg, cap); }
+bool installCiaFile(const char* path, char* msg, size_t cap) { return installWith(fillFile, path, msg, cap); }
 
 UpdateResult runUpdate(char* msg, size_t cap) {
     UpdateResult c = checkUpdate(msg, cap);

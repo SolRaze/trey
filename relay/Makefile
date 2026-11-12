@@ -23,10 +23,10 @@ all:
 # Uploads this build as the latest GitHub release of SolRaze/trey, where the app's updater looks
 # (update.hpp UPDATE_BASE). Tag relay-<yymmddhhmm>; the tree should be committed and pushed first.
 release: all
-	echo '$(BUILD)' > app/build
-	gh release create relay-$(lastword $(subst @, ,$(BUILD))) app/relay.cia app/build --repo SolRaze/trey \
+	mkdir -p /tmp/relay-release && echo '$(BUILD)' > /tmp/relay-release/build
+	gh release create relay-$(lastword $(subst @, ,$(BUILD))) app/relay.cia /tmp/relay-release/build --repo SolRaze/trey \
 		--title 'relay $(VERSION_MAJOR).$(VERSION_MINOR).$(VERSION_REVISION)' --notes '$(BUILD)' --latest
-	rm -f app/build
+	rm -rf /tmp/relay-release
 
 clean:
 	$(MAKE) -C plugin clean

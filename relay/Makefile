@@ -1,6 +1,6 @@
 VERSION_MAJOR := 1
 VERSION_MINOR := 3
-VERSION_REVISION := 3
+VERSION_REVISION := 5
 VERSIONS := VERSION_MAJOR=$(VERSION_MAJOR) VERSION_MINOR=$(VERSION_MINOR) VERSION_REVISION=$(VERSION_REVISION)
 
 # common/build.h: "<commit>[+]@<yymmddhhmm>", "+" for a dirty tree; the app's updater orders builds by

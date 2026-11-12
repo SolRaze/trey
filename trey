@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive trey (the 3DS) from the Mac: files over ftpd, launch over 3dslink, input over Rosalina InputRedirection.
+"""Drive trey (the 3DS) from the Mac: files over the Relay app's FTP, launch over 3dslink, input over Rosalina InputRedirection.
 
   trey ls [path]                 list a card directory
   trey get <remote> [local]      download
@@ -9,15 +9,16 @@
   trey site <verb> [args]        relay SITE command: help stat shot log light titles launch play reboot poweroff
   trey shot [dir]                relay screenshot of both screens as PNG, default /tmp
   trey install <file.cia>        relay app only: stream into the installer, no FBI
-  trey saves pull|push [dir]     save copies in /3ds/relay/saves <-> dir, default ./saves
-                                 pull after Sync saves; push runs Sync saves on the console after
+  trey saves pull|push [dir] [-f]  save copies in /3ds/relay/saves <-> dir, default ./saves
+                                 push runs Sync saves after; -f puts them in saves/in, which always
+                                 overwrite the console's save (old one kept in saves/old/<TID>)
   trey run <app.3dsx> [args]     send and start; Homebrew Launcher must be on its Y netloader screen
   trey press <btn>... [-t ms]    tap buttons together: a b x y l r up down left right start select
-                                 refuses START while ftpd answers (START quits ftpd); -f overrides
+                                 refuses START while Relay answers (START quits it); -f overrides
   trey touch <x> <y> [-t ms]     tap bottom screen, 320x240
   trey home | trey power         HOME button, power button (power menu)
 
-ftpd must be open on the 3DS. press/touch/home/power need Rosalina > Miscellaneous options
+Relay must be open on the 3DS. press/touch/home/power need Rosalina > Miscellaneous options
 > InputRedirection started; it resets every boot. TREY_HOST overrides the address.
 """
 import ftplib
@@ -69,7 +70,7 @@ def tap(hold_ms, **state):
     send()
 
 
-def ftpd_up():
+def ftp_up():
     try:
         socket.create_connection((HOST, 5000), timeout=2).close()
         return True
@@ -120,10 +121,13 @@ def main(argv):
     if cmd == "install":
         return lftp(f"put {q(args[0])} -o {q('/install/' + os.path.basename(args[0]))}")
     if cmd == "saves" and args and args[0] in ("pull", "push"):
-        local = args[1] if len(args) > 1 else "saves"
+        force = "-f" in args
+        rest = [a for a in args[1:] if a != "-f"]
+        local = rest[0] if rest else "saves"
         if args[0] == "pull":
             return lftp(f"mirror {q(SAVES)} {q(local)}")
-        rc = lftp(f"mirror -R --no-recursion -I '*.sav' {q(local)} {q(SAVES)}")
+        dest = SAVES + "/in" if force else SAVES
+        rc = lftp(f"mkdir -p -f {q(dest)}\nmirror -R --no-recursion -I '*.sav' -I '*.ext' {q(local)} {q(dest)}")
         if rc == 0:
             print(site("SYNC"))
         return rc
@@ -137,8 +141,8 @@ def main(argv):
         hold = pop_hold(args)
         force = "-f" in args
         args = [a for a in args if a != "-f"]
-        if "start" in (a.lower() for a in args) and not force and ftpd_up():
-            sys.exit("ftpd is up, so it is the foreground app and START quits it; -f to press anyway")
+        if "start" in (a.lower() for a in args) and not force and ftp_up():
+            sys.exit("Relay is up, so it is the foreground app and START quits it; -f to press anyway")
         # Rosalina menu stops InputRedirection: once open, no press can close it.
         if {"l", "down", "select"} <= {a.lower() for a in args}:
             sys.exit("L+Down+Select opens the Rosalina menu, which InputRedirection cannot reach; press it by hand")

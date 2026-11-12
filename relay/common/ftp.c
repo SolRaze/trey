@@ -51,6 +51,10 @@ static Thread listener;
 static int pasv_next;
 static volatile unsigned long long total_rx, total_tx;
 static char last_action[96];
+/* Latest transfer started, for the progress line; an older one ending leaves it alone. */
+static volatile int xfer_kind;                       /* 0 none, 1 get, 2 put */
+static volatile unsigned xfer_id;
+static volatile unsigned long long xfer_size, xfer_base;
 static const ftp_hooks_t *hooks;
 static char log_ring[FTP_LOG_LINES][96];
 static volatile unsigned log_next;
@@ -95,7 +99,22 @@ void ftp_status(ftp_status_t *out) {
     out->tx = total_tx;
     memcpy(out->last, last_action, sizeof(out->last));
     out->last[sizeof(out->last) - 1] = '\0';
+    out->xfer = xfer_kind;
+    out->xfer_size = xfer_size;
+    unsigned long long now = xfer_kind == 1 ? total_tx : total_rx;
+    out->xfer_done = xfer_kind && now > xfer_base ? now - xfer_base : 0;
 }
+
+static unsigned xfer_begin(int kind, unsigned long long size) {
+    unsigned id = __atomic_add_fetch(&xfer_id, 1, __ATOMIC_RELAXED);
+    xfer_kind = 0;
+    xfer_size = size;
+    xfer_base = kind == 1 ? total_tx : total_rx;
+    xfer_kind = kind;
+    return id;
+}
+
+static void xfer_end(unsigned id) { if (xfer_id == id) xfer_kind = 0; }
 
 int ftp_sessions(void) { return sessions; }
 
@@ -327,6 +346,8 @@ static void cmd_retr(sess_t *s, const char *arg) {
     }
     if (!open_data(s, "Sending")) { close(fd); return; }
     note("get", abs);
+    struct stat st;
+    unsigned id = xfer_begin(1, fstat(fd, &st) == 0 && (u64)st.st_size > rest ? (u64)st.st_size - rest : 0);
     bool ok = true;
     for (;;) {
         ssize_t n = read(fd, s->buf, BUF_SIZE);
@@ -335,6 +356,7 @@ static void cmd_retr(sess_t *s, const char *arg) {
         if (!send_all(s->data, s->buf, n)) { ok = false; break; }
     }
     close(fd);
+    xfer_end(id);
     finish_data(s);
     reply(s, ok ? "226 Done" : "426 Transfer aborted");
 }
@@ -368,6 +390,7 @@ static void cmd_stor(sess_t *s, const char *arg) {
         return;
     }
     note(take ? "install" : "put", abs);
+    unsigned id = xfer_begin(2, 0);   /* clients send no size ahead of STOR */
     bool ok = true;
     /* Fills the buffer before each card write: recv hands over a packet or two at a time,
      * and one FS call per packet is what makes an upload slow. */
@@ -394,6 +417,7 @@ static void cmd_stor(sess_t *s, const char *arg) {
         }
     }
     close_fd(&s->data);
+    xfer_end(id);
     if (take) {
         err = hooks->sink_close(ctx, ok);
         if (ok && err) ok = false;

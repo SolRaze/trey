@@ -42,6 +42,7 @@ bool isControllerMode = false;
 extern "C" {
     #include "csvc.h"
 }
+#include "led.h"
 
 void    DisableSleep(void)
 {
@@ -152,11 +153,13 @@ void Start(void* arg) {
         }
         
         articBase = new ArticBaseServer(accept_fd);
+        led_broadcast(LED_BROADCAST_LIVE);
         articBase->Serve();
         accept_fd = -1;
         delete articBase;
         articBase = nullptr;
         logger.Info("Server: Disconnected");
+        led_broadcast(LED_BROADCAST_OFF);
 
         for (auto it = ArticBaseFunctions::destructFunctions.begin(); it != ArticBaseFunctions::destructFunctions.end(); it++) {
             (*it)();

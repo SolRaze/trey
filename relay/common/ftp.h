@@ -23,6 +23,8 @@ typedef struct {
     int sessions;
     unsigned long long rx, tx;  /* bytes received, sent; data connections only */
     char last[96];              /* most recent file action, "put /3ds/x" */
+    int xfer;                   /* transfer under way: 0 none, 1 get, 2 put */
+    unsigned long long xfer_done, xfer_size;   /* bytes so far; size 0 = unknown (every put) */
 } ftp_status_t;
 void ftp_status(ftp_status_t *out);
 

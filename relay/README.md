@@ -3,7 +3,7 @@ relay
 trey's console app + Luma plugin | fork of ArticBaseServer v1.2.0 | github.com/azahar-emu/ArticBaseServer
 
 parts
-- app/ Relay launcher, citro2d menu | FTP on 5000 | rows broadcast, sync, inbox, update, theme, exit
+- app/ Relay launcher, citro2d menu | FTP on 5000 | rows broadcast | saves, inbox | wifi, update, theme | saves page: sync, per-title backups, restore
 - plugin/ Luma 3GX in the game process | Artic Base server 5543 + FTP 5000
 - common/ FTP server, SITE commands, CIA install sink | `common/test/host.sh` tests it on the Mac
 

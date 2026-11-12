@@ -9,6 +9,7 @@
 #include <strings.h>
 #include <sys/stat.h>
 
+#include "build.h"
 #include "ftp.h"
 #include "site.h"
 
@@ -96,7 +97,8 @@ static int site_shot(char *out, size_t cap) {
 /* ---- status ---- */
 
 static int site_stat(char *out, size_t cap) {
-    size_t n = snprintf(out, cap, "mode %s", is_app ? "relay" : "broadcast");
+    size_t n = snprintf(out, cap, "mode %s\nbuild v%d.%d.%d %s", is_app ? "relay" : "broadcast",
+                        VERSION_MAJOR, VERSION_MINOR, VERSION_REVISION, RELAY_BUILD);
 
     u8 level = 0, charging = 0;
     bool have_level = R_SUCCEEDED(mcuHwcInit());
@@ -198,7 +200,7 @@ static int request(site_req_t r, const char *what, char *out, size_t cap) {
 }
 
 static const char HELP[] =
-    "SITE STAT        mode, battery, wifi, sd free, title, light\n"
+    "SITE STAT        mode, build, battery, wifi, sd free, title, light\n"
     "SITE SHOT        both screens to /3ds/relay/top.bmp, bottom.bmp\n"
     "SITE LOG         recent events\n"
     "SITE LIGHT on|off  backlight, both screens\n"

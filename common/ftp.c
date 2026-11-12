@@ -291,7 +291,7 @@ static void cmd_list(sess_t *s, const char *arg, bool names_only) {
 
     size_t used = 0;
     bool ok = true;
-    char child[PATH_MAX + 8];
+    char child[PATH_MAX + 8 + NAME_MAX + 2];
     struct dirent *e;
     while (ok && (e = readdir(d))) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;

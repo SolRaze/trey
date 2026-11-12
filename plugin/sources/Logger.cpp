@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdio.h>
 #include "3ds.h"
+#include "ftp.h"
 
 Logger::Logger() {}
 
@@ -53,6 +54,7 @@ void Logger::Info(const char* fmt, ...) {
         CTRPluginFramework::Lock l(pendingLogsMutex);
         pendingLogs.push(PendingLog{.type = PendingLog::Type::INFO, .isTopScr = true, .string{buffer}});
     }
+    ftp_log("%s", buffer);  // SITE LOG
     LightEvent_Signal(&event);
 }
 
@@ -82,6 +84,7 @@ void Logger::Warning(const char* fmt, ...) {
         CTRPluginFramework::Lock l(pendingLogsMutex);
         pendingLogs.push(PendingLog{.type = PendingLog::Type::WARNING, .isTopScr = true, .string{buffer}});
     }
+    ftp_log("%s", buffer);  // SITE LOG
     LightEvent_Signal(&event);
 }
 
@@ -96,6 +99,7 @@ void Logger::Error(const char* fmt, ...) {
         CTRPluginFramework::Lock l(pendingLogsMutex);
         pendingLogs.push(PendingLog{.type = PendingLog::Type::ERROR, .isTopScr = true, .string{buffer}});
     }
+    ftp_log("%s", buffer);  // SITE LOG
     LightEvent_Signal(&event);
 }
 
@@ -153,14 +157,12 @@ void Logger::Handler() {
                 printf("[I] %s\n", log.string.c_str());
                 break;
             case PendingLog::Type::WARNING:
-                topScreenConsole.fg = 19;
                 printf("[W] %s\n", log.string.c_str());
-                topScreenConsole.fg = 0;
                 break;
             case PendingLog::Type::ERROR:
                 topScreenConsole.fg = 17;
                 printf("[E] %s\n", log.string.c_str());
-                topScreenConsole.fg = 0;
+                topScreenConsole.fg = 7;  // main.cpp console colour
                 break;
             case PendingLog::Type::TRAFFIC:
                 back = bottomScreenConsole.cursorY;

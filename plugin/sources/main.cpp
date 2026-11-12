@@ -21,6 +21,8 @@
 #include "BCLIM.hpp"
 
 #include "logo.h"
+#include "ftp.h"
+#include "site.h"
 
 #define SOC_ALIGN       0x1000
 #define SOC_BUFFERSIZE  0x400000
@@ -73,12 +75,6 @@ void    EnableSleep(void)
 
 void Start(void* arg) {
     int res;
-    void* SOC_buffer = memalign(SOC_ALIGN, SOC_BUFFERSIZE);
-    if ((res = socInit((u32*)SOC_buffer, SOC_BUFFERSIZE)) != 0) {
-        free(SOC_buffer);
-        logger.Error("Server: Cannot initialize sockets");
-        return;
-    }
     while (should_run) {
         svcSleepThread(500000000);
         struct sockaddr_in servaddr = {0};
@@ -168,8 +164,6 @@ void Start(void* arg) {
         isControllerMode = false;
         everControllerMode = false;
     }
-    socExit();
-    free(SOC_buffer);
 }
 
 PrintConsole topScreenConsole, bottomScreenConsole;
@@ -188,8 +182,9 @@ void Main() {
     gfxInitDefault();
 	consoleInit(GFX_TOP, &topScreenConsole);
     consoleInit(GFX_BOTTOM, &bottomScreenConsole);
-    topScreenConsole.bg = 15; topScreenConsole.fg = 0;
-    bottomScreenConsole.bg = 15; bottomScreenConsole.fg = 0;
+    // Matches the launcher: dark field, light text.
+    topScreenConsole.bg = 0; topScreenConsole.fg = 7;
+    bottomScreenConsole.bg = 0; bottomScreenConsole.fg = 7;
 
     gfxSetDoubleBuffering(GFX_BOTTOM, false);
 
@@ -200,13 +195,10 @@ void Main() {
     consoleSelect(&topScreenConsole);
     consoleClear();
 
-    {
-        CTRPluginFramework::BCLIM((void*)__data_logo_bin, __data_logo_bin_size).Render(CTRPluginFramework::Rect<int>((320 - 128) / 2, (240 - 128) / 2, 128, 128));
-    }
 
     auto print_bottom_info = [](bool controller_mode) {
         if (controller_mode) {
-            logger.Raw(false,   "\n            ArticBase v%d.%d.%d\n\n"
+            logger.Raw(false,   "\n              Relay v%d.%d.%d\n\n"
                                 "        Artic Controller enabled       \n"
                                 "                                       \n"
                                 "  - X + START + SELECT: Exit           \n"
@@ -215,7 +207,7 @@ void Main() {
                                 , VERSION_MAJOR, VERSION_MINOR, VERSION_REVISION);
         } else {
             if (everControllerMode) {
-                logger.Raw(false,   "\n            ArticBase v%d.%d.%d\n\n"
+                logger.Raw(false,   "\n              Relay v%d.%d.%d\n\n"
                                 "  - A:      Enter sleep                \n"
                                 "  - X:      Show debug log             \n"
                                 "  - Y:      Restart server             \n"
@@ -223,7 +215,7 @@ void Main() {
                                 "  - SELECT: Enter Artic controller mode "
                                 , VERSION_MAJOR, VERSION_MINOR, VERSION_REVISION);
             } else {
-                logger.Raw(false,   "\n            ArticBase v%d.%d.%d\n\n"
+                logger.Raw(false,   "\n              Relay v%d.%d.%d\n\n"
                                 "  - A:      Enter sleep                \n"
                                 "  - X:      Show debug log             \n"
                                 "  - Y:      Restart server             \n"
@@ -244,6 +236,25 @@ void Main() {
     }
 
     Thread serverThread = nullptr;
+    void* SOC_buffer = memalign(SOC_ALIGN, SOC_BUFFERSIZE);
+    if (!SOC_buffer || socInit((u32*)SOC_buffer, SOC_BUFFERSIZE) != 0) {
+        free(SOC_buffer);
+        SOC_buffer = nullptr;
+        logger.Error("Server: Cannot initialize sockets");
+        setupCorrect = false;
+    } else {
+        s32 prio = 0;
+        svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+        // Below the Artic server and the UI loop: FTP must never starve the broadcast.
+        site_init(false);
+        if (ftp_start(prio + 2, "trey broadcast") != 0)
+            logger.Error("FTP: Cannot start");
+        else {
+            struct in_addr host_id;
+            host_id.s_addr = gethostid();
+            logger.Info("FTP: %s:%d", inet_ntoa(host_id), FTP_PORT);
+        }
+    }
     if (!setupCorrect) {
         logger.Error("Server: Setup failed");
     } else {
@@ -290,6 +301,19 @@ void Main() {
 		if ((kDown & KEY_START) && !isControllerMode) {
             logger.Info("Server: Exiting");
             break;
+        }
+
+        u64 title;
+        u8 media;
+        site_req_t req = site_take(&title, &media);
+        if (req == SITE_PLAY) {
+            logger.Info("Server: Exiting, SITE PLAY");
+            svcSleepThread(300000000LL);  // the 200 reply leaves before FTP stops
+            break;
+        }
+        if (req == SITE_REBOOT || req == SITE_POWEROFF) {
+            svcSleepThread(300000000LL);
+            site_power(req);
         }
 
         if ((kDown & KEY_SELECT) && !isControllerMode && everControllerMode) {
@@ -354,6 +378,11 @@ void Main() {
     if (serverThread) {
         threadJoin(serverThread, U64_MAX);
         threadFree(serverThread);
+    }
+    ftp_stop();
+    if (SOC_buffer) {
+        socExit();
+        free(SOC_buffer);
     }
 
     EnableSleep();

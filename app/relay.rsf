@@ -1,20 +1,17 @@
 BasicInfo:
-  Title                   : $(APP_TITLE)
-  ProductCode             : $(APP_PRODUCT_CODE)
+  Title                   : Relay
+  ProductCode             : CTR-H-RELAY
   Logo                    : Homebrew
 
-RomFs:
-  RootPath: $(APP_ROMFS)
-
 TitleInfo:
-  Category                : $(APP_CATEGORY)
-  UniqueId                : $(APP_UNIQUE_ID)
+  Category                : Application
+  UniqueId                : 0xF0E7A
 
 Option:
-  UseOnSD                 : $(APP_USE_ON_SD) # true if App is to be installed to SD
+  UseOnSD                 : true # true if App is to be installed to SD
   FreeProductCode         : true # Removes limitations on ProductCode
   MediaFootPadding        : false # If true CCI files are created with padding
-  EnableCrypt             : $(APP_ENCRYPTED) # Enables encryption for NCCH and CIA
+  EnableCrypt             : false # Enables encryption for NCCH and CIA
   EnableCompress          : true # Compresses where applicable (currently only exefs:/.code)
   
 AccessControlInfo:
@@ -67,8 +64,8 @@ AccessControlInfo:
    - UseCardSpi
 
   # Process Settings
-  MemoryType                    : $(APP_MEMORY_TYPE) # Application/System/Base
-  SystemMode                    : $(APP_SYSTEM_MODE) # 64MB(Default)/96MB/80MB/72MB/32MB
+  MemoryType                    : Application # Application/System/Base
+  SystemMode                    : 64MB # 64MB(Default)/96MB/80MB/72MB/32MB
   IdealProcessor                : 0
   AffinityMask                  : 1
   Priority                      : 16
@@ -85,9 +82,9 @@ AccessControlInfo:
   SpecialMemoryArrange          : true
 
   # New3DS Exclusive Process Settings
-  SystemModeExt                 : $(APP_SYSTEM_MODE_EXT) # Legacy(Default)/124MB/178MB  Legacy:Use Old3DS SystemMode
-  CpuSpeed                      : $(APP_CPU_SPEED) # 268MHz(Default)/804MHz
-  EnableL2Cache                 : $(APP_ENABLE_L2_CACHE) # false(default)/true
+  SystemModeExt                 : Legacy # Legacy(Default)/124MB/178MB  Legacy:Use Old3DS SystemMode
+  CpuSpeed                      : 268MHz # 268MHz(Default)/804MHz
+  EnableL2Cache                 : false # false(default)/true
   CanAccessCore2                : true 
 
   # Virtual Address Mappings

@@ -7,9 +7,9 @@ Version: # Plugin version
 
 Targets: # Low TitleId of games which are compatibles with this plugin (empty for all)
 
-Title: Artic Base Server
+Title: Relay
 
-Summary: 3DS Game Broadcaster
+Summary: FTP and Artic Base broadcast
 
 Description: |
   Broadcast your games to a compatible emulator

@@ -1,8 +1,7 @@
 /build
-*.3gx
-.vscode/
-output/
+/data
+*.3dsx
+*.elf
+*.smdh
 *.map
-
-includes/plugin.h
-sources/plugin.c
+*.cia

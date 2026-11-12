@@ -1,6 +1,14 @@
 #pragma once
 #include "3ds.h"
 
+// libctru now ships its own AM_TicketInfo and AMAPP_* with other signatures; keep these private.
+#define AM_TicketInfo ABS_AM_TicketInfo
+#define AM_GetTitleInfoIgnorePlatform ABS_AM_GetTitleInfoIgnorePlatform
+#define AMAPP_FindDLCContentInfos ABS_AMAPP_FindDLCContentInfos
+#define AMAPP_GetDLCTitleInfos ABS_AMAPP_GetDLCTitleInfos
+#define AMAPP_ListDataTitleTicketInfos ABS_AMAPP_ListDataTitleTicketInfos
+#define AMAPP_GetPatchTitleInfos ABS_AMAPP_GetPatchTitleInfos
+
 typedef struct
 {
     u64 title_id;

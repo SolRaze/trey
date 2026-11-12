@@ -7,12 +7,12 @@ endif
 TOPDIR 		?= 	$(CURDIR)
 include $(DEVKITARM)/3ds_rules
 
-TARGET		:= 	ArticBase
-PLGINFO 	:= 	build/ArticBase.plgInfo
+TARGET		:= 	relay
+PLGINFO 	:= 	build/relay.plgInfo
 
 BUILD		:= 	build
-INCLUDES	:= 	includes
-SOURCES 	:= 	sources sources/CTRPluginFramework
+INCLUDES	:= 	includes ../common
+SOURCES 	:= 	sources sources/CTRPluginFramework ../common
 
 VERSION_MAJOR := 1
 VERSION_MINOR := 2
@@ -94,6 +94,7 @@ re: clean all
 else
 
 DEPENDS	:=	$(OFILES:.o=.d)
+.PRECIOUS: %.elf
 
 #---------------------------------------------------------------------------------
 # main targets
@@ -113,7 +114,7 @@ $(OUTPUT).3gx : $(OFILES)
 #---------------------------------------------------------------------------------
 	@echo creating $(notdir $@)
 	@3gxtool -s $(word 1, $^) $(TOPDIR)/$(PLGINFO) $@
-	@mv $(OUTPUT).elf ArticBasedebug.elf
+	@mv $(OUTPUT).elf $(TARGET)-debug.elf
 
 -include $(DEPENDS)
 

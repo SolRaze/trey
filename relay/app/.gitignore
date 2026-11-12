@@ -1,0 +1,7 @@
+/build
+/data
+*.3dsx
+*.elf
+*.smdh
+*.map
+*.cia

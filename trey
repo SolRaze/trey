@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Drive trey (the 3DS) from the Mac: files over ftpd, launch over 3dslink, input over Rosalina InputRedirection.
+
+  trey ls [path]                 list a card directory
+  trey get <remote> [local]      download
+  trey put <local> <remote>      upload
+  trey rm <remote>...            delete files or directories
+  trey ftp <lftp commands>       anything else, e.g. trey ftp 'mirror /luma ./luma'
+  trey site <verb> [args]        relay SITE command: help stat shot log light titles launch play reboot poweroff
+  trey shot [dir]                relay screenshot of both screens as PNG, default /tmp
+  trey install <file.cia>        relay app only: stream into the installer, no FBI
+  trey run <app.3dsx> [args]     send and start; Homebrew Launcher must be on its Y netloader screen
+  trey press <btn>... [-t ms]    tap buttons together: a b x y l r up down left right start select
+                                 refuses START while ftpd answers (START quits ftpd); -f overrides
+  trey touch <x> <y> [-t ms]     tap bottom screen, 320x240
+  trey home | trey power         HOME button, power button (power menu)
+
+ftpd must be open on the 3DS. press/touch/home/power need Rosalina > Miscellaneous options
+> InputRedirection started; it resets every boot. TREY_HOST overrides the address.
+"""
+import ftplib
+import os
+import socket
+import subprocess
+import sys
+import time
+
+HOST = os.environ.get("TREY_HOST", "5.0.0.8")
+FTP = f"ftp://{HOST}:5000"
+IR_PORT = 4950
+
+# HID bit per button; InputRedirection takes the pad word active-low (0xfff = nothing held).
+BUTTONS = {"a": 0, "b": 1, "select": 2, "start": 3, "right": 4, "left": 5,
+           "up": 6, "down": 7, "r": 8, "l": 9, "x": 10, "y": 11}
+PAD_IDLE, TOUCH_IDLE, CIRCLE_IDLE, CPP_IDLE = 0xFFF, 0x2000000, 0x7FF7FF, 0x80800081
+HOME, POWER = 1, 2
+
+
+def lftp(commands):
+    script = f"open {FTP}\nset net:timeout 20\nset net:max-retries 2\nset cmd:fail-exit yes\n{commands}\n"
+    return subprocess.run(["lftp", "-f", "/dev/stdin"], input=script, text=True).returncode
+
+
+def site(*words):
+    with ftplib.FTP() as f:
+        f.connect(HOST, 5000, timeout=20)
+        try:
+            return f.sendcmd("SITE " + " ".join(words))
+        except ftplib.Error as e:
+            sys.exit(str(e))
+
+
+def q(path):
+    return '"' + path.replace('"', '\\"') + '"'
+
+
+def send(pad=PAD_IDLE, touch=TOUCH_IDLE, special=0):
+    pkt = b"".join(v.to_bytes(4, "little") for v in (pad, touch, CIRCLE_IDLE, CPP_IDLE, special))
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.sendto(pkt, (HOST, IR_PORT))
+
+
+def tap(hold_ms, **state):
+    send(**state)
+    time.sleep(hold_ms / 1000)
+    send()
+
+
+def ftpd_up():
+    try:
+        socket.create_connection((HOST, 5000), timeout=2).close()
+        return True
+    except OSError:
+        return False
+
+
+def pop_hold(args, default=100):
+    if "-t" in args:
+        i = args.index("-t")
+        ms = int(args[i + 1])
+        del args[i:i + 2]
+        return ms
+    return default
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return 0
+    cmd, args = argv[0], argv[1:]
+    if cmd == "ls":
+        return lftp(f"cls -l {q(args[0] if args else '/')}")
+    if cmd == "get":
+        local = args[1] if len(args) > 1 else os.path.basename(args[0])
+        return lftp(f"get {q(args[0])} -o {q(local)}")
+    if cmd == "put":
+        return lftp(f"put {q(args[0])} -o {q(args[1])}")
+    if cmd == "rm":
+        return lftp("\n".join(f"rm -r {q(p)}" for p in args))
+    if cmd == "site":
+        print(site(*args))
+        return 0
+    if cmd == "shot":
+        out = args[0] if args else "/tmp"
+        print(site("SHOT"))
+        with ftplib.FTP() as f:
+            f.connect(HOST, 5000, timeout=20)
+            for name in ("top", "bottom"):
+                bmp = os.path.join(out, f"trey-{name}.bmp")
+                with open(bmp, "wb") as fh:
+                    f.retrbinary(f"RETR /3ds/relay/{name}.bmp", fh.write)
+                png = bmp[:-3] + "png"
+                subprocess.run(["sips", "-s", "format", "png", bmp, "--out", png], capture_output=True, check=True)
+                os.remove(bmp)
+                print(png)
+        return 0
+    if cmd == "install":
+        return lftp(f"put {q(args[0])} -o {q('/install/' + os.path.basename(args[0]))}")
+    if cmd == "ftp":
+        return lftp(" ".join(args))
+    if cmd == "run":
+        tool = os.path.join(os.environ.get("DEVKITPRO", "/opt/devkitpro"), "tools/bin/3dslink")
+        extra = ["--args", *args[1:]] if len(args) > 1 else []
+        return subprocess.run([tool, "-a", HOST, args[0], *extra]).returncode
+    if cmd == "press":
+        hold = pop_hold(args)
+        force = "-f" in args
+        args = [a for a in args if a != "-f"]
+        if "start" in (a.lower() for a in args) and not force and ftpd_up():
+            sys.exit("ftpd is up, so it is the foreground app and START quits it; -f to press anyway")
+        # Rosalina menu stops InputRedirection: once open, no press can close it.
+        if {"l", "down", "select"} <= {a.lower() for a in args}:
+            sys.exit("L+Down+Select opens the Rosalina menu, which InputRedirection cannot reach; press it by hand")
+        mask = 0
+        for name in args:
+            if name.lower() not in BUTTONS:
+                sys.exit(f"unknown button {name!r}; one of {' '.join(BUTTONS)}")
+            mask |= 1 << BUTTONS[name.lower()]
+        tap(hold, pad=PAD_IDLE & ~mask)
+        return 0
+    if cmd == "touch":
+        hold = pop_hold(args)
+        x, y = int(args[0]), int(args[1])
+        if not (0 <= x < 320 and 0 <= y < 240):
+            sys.exit("touch is 0-319 x 0-239")
+        tap(hold, touch=(1 << 24) | ((y * 0xFFF // 239) << 12) | (x * 0xFFF // 319))
+        return 0
+    if cmd in ("home", "power"):
+        tap(100, special=HOME if cmd == "home" else POWER)
+        return 0
+    sys.exit(f"unknown command {cmd!r}; trey --help")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

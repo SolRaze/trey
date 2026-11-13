@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "arm.hpp"
+#include "clock.hpp"
 #include "inbox.hpp"
 #include "net.hpp"
 #include "saves.hpp"
@@ -39,7 +40,7 @@ static const Theme THEMES[] = {
                 C2D_Color32(12, 12, 14, 255), C2D_Color32(12, 12, 14, 255) },
               { C2D_Color32(12, 12, 14, 255), C2D_Color32(12, 12, 14, 255),
                 C2D_Color32(12, 12, 14, 255), C2D_Color32(12, 12, 14, 255) },
-      C2D_Color32(236, 236, 238, 255), C2D_Color32(150, 150, 156, 255), C2D_Color32(96, 96, 102, 255),
+      C2D_Color32(236, 236, 238, 255), C2D_Color32(150, 150, 156, 255), C2D_Color32(122, 122, 128, 255),
       C2D_Color32(158, 214, 190, 255), C2D_Color32(230, 104, 104, 255),
       C2D_Color32(236, 236, 238, 255), C2D_Color32(150, 150, 156, 255), false },
     { "memcard", { C2D_Color32(196, 196, 196, 255), C2D_Color32(110, 110, 110, 255),
@@ -77,9 +78,9 @@ static const int MARGIN = 24;
 static const int ROW_TOP = 8, ROW_H = 25, GROUP_GAP = 6, DESC_Y = 182, VIS = 6, MAX_ROWS = 128;
 enum { ITEM_BROADCAST, ITEM_SAVES, ITEM_INBOX, ITEM_WIFI, ITEM_UPDATE, ITEM_THEME, ITEM_COUNT };
 static const char* ITEM_TITLE[] = { "Broadcast a game", "Saves", "Install from inbox", "Wi-Fi", "Update", "Theme" };
-enum { WIFI_SLOT1, WIFI_SLOT2, WIFI_SLOT3, WIFI_RADIO, WIFI_SETTINGS, WIFI_COUNT };
+enum { WIFI_SLOT1, WIFI_SLOT2, WIFI_SLOT3, WIFI_RADIO, WIFI_SETTINGS, WIFI_CLOCK, WIFI_COUNT };
 // Bit i set = a group starts at visible row i. Main: Broadcast | Saves, Inbox | Wi-Fi, Update, Theme.
-// Wi-Fi: the three connections | radio, settings. Saves: Sync now | titles.
+// Wi-Fi: the three connections | radio, settings, clock. Saves: Sync now | titles.
 static const u32 MAIN_GROUPS = BIT(ITEM_SAVES) | BIT(ITEM_WIFI), WIFI_GROUPS = BIT(WIFI_RADIO), SAVES_GROUPS = BIT(1);
 static u32 groups = MAIN_GROUPS;
 static int rowY(int i) {
@@ -222,10 +223,7 @@ static void drawTop(const Screen& s) {
     }
     C2D_DrawRectSolid(MARGIN, 76, 0, 8, 8, mark);
     text(MARGIN + 16, 70, 0.55f, s.state == State::Ready || s.state == State::Armed ? T->white : T->grey, label);
-    if (s.wifi.ap) {
-        bars(TOP_W - MARGIN - 16, 72, s.wifi.strength, T->white, T->dim);
-        text(TOP_W - MARGIN - 24, 70, 0.5f, T->grey, s.wifi.ssid, C2D_AlignRight);
-    }
+    if (s.wifi.ap) text(TOP_W - MARGIN, 70, 0.5f, T->grey, s.wifi.ssid, C2D_AlignRight);
 
     if (s.state == State::Armed) {
         text(MARGIN, 100, 0.95f, T->white, "Pick a game on HOME");
@@ -390,9 +388,17 @@ int main(int argc, char* argv[]) {
     char inboxMsg[96] = "Installs CIAs in /3ds/relay/inbox";
     char updateMsg[96] = "Checks GitHub for a newer build";
     char pageMsg[96] = "";
-    char themeMsg[48], wifiRow[64], slotRow[3][48], slotDesc[3][48];
+    char themeMsg[48], wifiRow[64], slotRow[3][48], slotDesc[3][48], clockDesc[80];
     // Jobs block: the row shows its "working" line for one frame, the job runs on the next.
-    enum class Job { None, Sync, Inbox, Update, Check, Connect, Radio, Restore } job = Job::None;
+    enum class Job { None, Sync, Inbox, Update, Check, Radio, Restore, Clock } job = Job::None;
+    char clockMsg[96] = "";
+    bool checkAfterClock = false;   // launch: a wrong clock fails TLS, so it is set before the update check
+    // Wi-Fi connect runs on its own thread (~10 s); the page counts the seconds meanwhile.
+    static volatile bool connBusy = false;
+    static int connSlot = 0;
+    static char connMsg[96];
+    Thread connThread = nullptr;
+    u64 connStart = 0;
     int jobSlot = 0;
     std::vector<SaveTitle> titles;
     std::vector<SaveBackup> backups;
@@ -422,9 +428,10 @@ int main(int argc, char* argv[]) {
     job = Job::Sync;
     // Backlights go off after IDLE_OFF frames with an FTP client and no input; any input or the
     // last client leaving brings them back.
+    // Backlight state lives in site.c, shared with SITE LIGHT: a press in the app lights both again.
     const int IDLE_OFF = 20 * 60;
     int idleFrames = 0;
-    bool dark = false;
+    bool idleDark = false, idleUsed = false;   // screens off by idle; idle already spent this quiet spell
     unsigned long long lastDone = 0;
 
     enum class Page { Main, Wifi, Saves, Backups } page = Page::Main;
@@ -441,15 +448,19 @@ int main(int argc, char* argv[]) {
         down |= hidKeysDownRepeat() & (KEY_DUP | KEY_DDOWN | KEY_CPAD_UP | KEY_CPAD_DOWN);   // held = repeat, lists
         bool input = down || hidKeysHeld();
         idleFrames = input ? 0 : idleFrames + 1;
-        bool wasDark = dark;
-        bool wantDark = s.ftp.sessions > 0 && idleFrames > IDLE_OFF && s.state != State::Armed;
-        if (wantDark != dark && R_SUCCEEDED(gspLcdInit())) {
-            if (wantDark) GSPLCD_PowerOffBacklight(GSPLCD_SCREEN_BOTH);
-            else GSPLCD_PowerOnBacklight(GSPLCD_SCREEN_BOTH);
-            gspLcdExit();
-            dark = wantDark;
+        if (input) idleUsed = false;
+        bool lit = !site_light_is_off();
+        if (lit) idleDark = false;
+        if (!lit && down) {
+            site_set_light(false);
+            idleDark = false;
+            down = 0;   // the press that wakes the screens does nothing else
+        } else if (lit && !idleUsed && s.ftp.sessions > 0 && idleFrames > IDLE_OFF && s.state != State::Armed) {
+            idleUsed = idleDark = site_set_light(true);
+        } else if (idleDark && (s.ftp.sessions == 0 || s.state == State::Armed)) {
+            site_set_light(false);
+            idleDark = false;
         }
-        if (wasDark) down = 0;   // the press that wakes the screens does nothing else
 
         // Rows for this frame's page; built before input so touch and A see the same list.
         groups = page == Page::Main ? MAIN_GROUPS : page == Page::Wifi ? WIFI_GROUPS : page == Page::Saves ? SAVES_GROUPS : 0;
@@ -477,10 +488,19 @@ int main(int argc, char* argv[]) {
                 snprintf(slotRow[i], sizeof(slotRow[i]), "Connection %d%s%s", i + 1,
                          s.wifi.slotsRead ? "  " : "", s.wifi.slotsRead ? (name[0] ? name : "empty") : "");
                 snprintf(slotDesc[i], sizeof(slotDesc[i]), "%s", here ? "Connected" : known ? "A to connect, about 10 s" : "Set it up in Internet settings");
-                rows[i] = { slotRow[i], slotDesc[i], known && !here && radioOn, here };
+                rows[i] = { slotRow[i], slotDesc[i], known && !here && radioOn && !connThread, here };
             }
-            rows[WIFI_RADIO] = { radioOn ? "Turn Wi-Fi off" : "Turn Wi-Fi on", radioOn ? "FTP stops until Wi-Fi is back" : "Wi-Fi is off", true, false };
-            rows[WIFI_SETTINGS] = { "Internet settings", "Opens System Settings to add or change networks", true, false };
+            rows[WIFI_RADIO] = { radioOn ? "Turn Wi-Fi off" : "Turn Wi-Fi on", radioOn ? "FTP stops until Wi-Fi is back" : "Wi-Fi is off", !connThread, false };
+            rows[WIFI_SETTINGS] = { "Internet settings", "Opens System Settings to add or change networks", !connThread, false };
+            if (!clockMsg[0] || job != Job::Clock) {
+                time_t now = time(NULL);
+                struct tm tm;
+                gmtime_r(&now, &tm);
+                char when[32];
+                strftime(when, sizeof(when), "%d %b %Y  %H:%M", &tm);
+                snprintf(clockDesc, sizeof(clockDesc), "%s%s", when, s.ip ? ", A sets it from the internet" : ", needs Wi-Fi to set");
+            }
+            rows[WIFI_CLOCK] = { "Set clock", clockMsg[0] ? clockMsg : clockDesc, s.ip && !connThread, false };
             rowCount = WIFI_COUNT;
         }
         if (pageMsg[0] && page != Page::Main && selected < rowCount) rows[selected].desc = pageMsg;
@@ -528,9 +548,9 @@ int main(int argc, char* argv[]) {
                 if (page == Page::Backups) selected = 0;   // the copy it replaced, now the newest
             } else if (j == Job::Inbox) {
                 installInbox(inboxMsg, sizeof(inboxMsg));
-            } else if (j == Job::Connect) {
-                wifiConnect(jobSlot, pageMsg, sizeof(pageMsg));
-                wifiPoll(s.wifi);
+            } else if (j == Job::Clock) {
+                clockSync(clockMsg, sizeof(clockMsg));
+                if (checkAfterClock) { checkAfterClock = false; job = Job::Check; }
             } else if (j == Job::Radio) {
                 if (wifiRadio(!radioOn, pageMsg, sizeof(pageMsg))) radioOn = !radioOn;
             } else if (!netUp) {
@@ -598,10 +618,18 @@ int main(int argc, char* argv[]) {
             ftp_log("arm: %s", s.fault ? s.fault : "ok");
         }
         if (page == Page::Wifi && remote < 0 && activate >= 0) {
-            if (activate <= WIFI_SLOT3) {
-                jobSlot = activate;
-                snprintf(pageMsg, sizeof(pageMsg), "Connecting to connection %d", activate + 1);
-                job = Job::Connect;
+            if (activate <= WIFI_SLOT3 && !connThread) {
+                connSlot = activate;
+                connBusy = true;
+                connStart = osGetTime();
+                s32 prio = 0x30;
+                svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+                connThread = threadCreate([](void*) { wifiConnect(connSlot, connMsg, sizeof(connMsg)); connBusy = false; },
+                                          nullptr, 0x4000, prio + 1, -1, false);
+                if (!connThread) { connBusy = false; snprintf(pageMsg, sizeof(pageMsg), "Could not start connecting"); }
+            } else if (activate == WIFI_CLOCK) {
+                snprintf(clockMsg, sizeof(clockMsg), "Asking pool.ntp.org");
+                job = Job::Clock;
             } else if (activate == WIFI_RADIO) {
                 snprintf(pageMsg, sizeof(pageMsg), radioOn ? "Turning Wi-Fi off" : "Turning Wi-Fi on");
                 job = Job::Radio;
@@ -610,6 +638,19 @@ int main(int argc, char* argv[]) {
                 if (tid) { aptSetChainloader(tid, MEDIATYPE_NAND); quit = true; }
                 else snprintf(pageMsg, sizeof(pageMsg), "System Settings not found for this region");
             }
+        }
+        if (req == SITE_CLOCK) { snprintf(clockMsg, sizeof(clockMsg), "Asking pool.ntp.org"); job = Job::Clock; }
+        if (connThread) {
+            if (connBusy) {
+                snprintf(pageMsg, sizeof(pageMsg), "Connecting to connection %d, %llu s", connSlot + 1, (osGetTime() - connStart) / 1000);
+            } else {
+                threadJoin(connThread, U64_MAX);
+                threadFree(connThread);
+                connThread = nullptr;
+                snprintf(pageMsg, sizeof(pageMsg), "%s", connMsg);
+                wifiPoll(s.wifi);
+            }
+            if (page == Page::Wifi && connThread) selected = connSlot;
         }
         if (req == SITE_LAUNCH) {
             // On exit libctru jumps to the chainload title, with the plugin armed for it.
@@ -630,7 +671,11 @@ int main(int argc, char* argv[]) {
             if (frame % 300 == 0) pollPower(s);
             s.rate = s.ftp.xfer && s.ftp.xfer_done > lastDone ? s.ftp.xfer_done - lastDone : 0;
             lastDone = s.ftp.xfer ? s.ftp.xfer_done : 0;
-            if (s.ip && !checked && job == Job::None) { checked = true; job = Job::Check; }
+            if (s.ip && !checked && job == Job::None) {
+                checked = true;
+                if (clockWrong()) { checkAfterClock = true; snprintf(clockMsg, sizeof(clockMsg), "Clock wrong, asking pool.ntp.org"); job = Job::Clock; }
+                else job = Job::Check;
+            }
         }
         if (s.state != State::Armed) ftp_status(&s.ftp);
 
@@ -684,7 +729,8 @@ int main(int argc, char* argv[]) {
         if (s.state == State::Armed && ++armedFrames > 120) break;
     }
 
-    if (dark && R_SUCCEEDED(gspLcdInit())) { GSPLCD_PowerOnBacklight(GSPLCD_SCREEN_BOTH); gspLcdExit(); }
+    if (site_light_is_off()) site_set_light(false);
+    if (connThread) { threadJoin(connThread, U64_MAX); threadFree(connThread); }
     ftp_stop();
     wifiExit();
     if (netUp) netExit();

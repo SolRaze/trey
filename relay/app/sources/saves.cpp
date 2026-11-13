@@ -258,9 +258,14 @@ static std::vector<std::string> listDir(const std::string& dir, bool dirs) {
     DIR* d = opendir(dir.c_str());
     if (!d) return out;
     while (struct dirent* e = readdir(d)) {
+        if (e->d_name[0] == '.') continue;
+        bool isDir = e->d_type == DT_DIR;   // libsysbase fills it from the FS directory attribute
         struct stat st;
-        if (e->d_name[0] == '.' || stat((dir + "/" + e->d_name).c_str(), &st)) continue;
-        if (S_ISDIR(st.st_mode) == dirs) out.push_back(e->d_name);
+        if (e->d_type == DT_UNKNOWN) {
+            if (stat((dir + "/" + e->d_name).c_str(), &st)) continue;
+            isDir = S_ISDIR(st.st_mode);
+        }
+        if (isDir == dirs) out.push_back(e->d_name);
     }
     closedir(d);
     std::sort(out.begin(), out.end());
@@ -275,7 +280,7 @@ static void titleName(u64 tid, u8 media, char* out, size_t cap) {
     Handle h;
     if (R_FAILED(FSUSER_OpenFileDirectly(&h, ARCHIVE_SAVEDATA_AND_CONTENT, (FS_Path){ PATH_BINARY, 16, arch },
                                          (FS_Path){ PATH_BINARY, 20, file }, FS_OPEN_READ, 0))) return;
-    static u8 smdh[8 + 2 * 0x200];   // header, then Japanese and English titles
+    static u8 smdh[0x36C0];   // whole SMDH: the exefs file refuses a shorter read
     u32 rd = 0;
     Result r = FSFILE_Read(h, &rd, 0, smdh, sizeof(smdh));
     FSFILE_Close(h);

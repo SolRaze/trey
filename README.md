@@ -16,16 +16,19 @@ rows | Broadcast a game | Saves, Install from inbox | Wi-Fi, Update, Theme | STA
 - checkpoint/ its backups in `/3ds/Checkpoint/saves|extdata/<0xID name>/<folder>/` listed and restorable | `sdmc:/3ds/relay/checkpoint` present = every relay backup also written there
 - limits/ archive over 8 MB skipped, logged | extdata id = unique id, titles with a moved id sync no extdata
 - inbox/ installs every CIA in `sdmc:/3ds/relay/inbox`, moves each to `done` | drop files there over FTP or on the card
-- wifi/ network, bars, IP on top | saved connections 1 to 3, A connects to one | Wi-Fi off and on | Internet settings opens System Settings
+- wifi/ network, bars, IP on top | saved connections 1 to 3, A connects to one, seconds counted | Wi-Fi off and on | Internet settings opens System Settings | Set clock
+- clock/ SNTP from `pool.ntp.org` + Luma `ntp_tz_offset_min` | RTC set, user offset zeroed, as Rosalina does | at launch when the clock reads before 2024, before the update check | TLS fails on a wrong clock
 - update/ latest release of this repo, `build` + `relay.cia` | checked at launch | installs only a newer stamp
 - https/ libcurl + mbedTLS, roots embedded at build | the console's own TLS fails GitHub's handshake
 - build/ devkitPro 3ds-dev + 3ds-curl | `3gxtool` `bannertool` `makerom` on PATH | `make -C relay` | `make -C relay release` uploads
 - build id/ `<commit>[+]@<yymmddhhmm>` | `+` dirty tree | stamp orders updates
-- SITE/ `trey site help` | SYNC INBOX UPDATE run Sync now, Install, Update remotely
+- SITE/ `trey site help` | SYNC INBOX UPDATE CLOCK run Sync now, Install, Update, Set clock remotely
+- screens/ off after 20 s idle with an FTP client | `SITE LIGHT` shares the state | any button lights them, that press does nothing else
 - themes/ `mono` | `memcard` | choice in `sdmc:/3ds/relay/theme`
 
 gotchas
 - HOME caches icons per title version | new icon needs a version bump
+- title icon/ exefs `icon` refuses a read shorter than the whole SMDH, 0x36C0, `E0C046F9`
 - AM's CIA file fails unaligned writes | HTTP body written in 64 KB pieces
 - Artic Base port 5543 takes one client then stops listening | never probe it
 - Rosalina menu open = InputRedirection deaf, FTP down

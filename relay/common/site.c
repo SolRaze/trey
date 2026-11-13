@@ -16,7 +16,7 @@
 #define SHOT_DIR "sdmc:/3ds/relay"
 
 static bool is_app;
-static bool light_off;
+static volatile bool light_off;
 static volatile site_req_t pending;
 static u64 pending_title;
 static u8 pending_media;
@@ -121,14 +121,21 @@ static int site_stat(char *out, size_t cap) {
     return 200;
 }
 
+bool site_set_light(bool off) {
+    if (R_FAILED(gspLcdInit())) return false;
+    Result r = off ? GSPLCD_PowerOffBacklight(GSPLCD_SCREEN_BOTH) : GSPLCD_PowerOnBacklight(GSPLCD_SCREEN_BOTH);
+    gspLcdExit();
+    if (R_FAILED(r)) { ftp_log("backlight %s failed %08lX", off ? "off" : "on", r); return false; }
+    light_off = off;
+    return true;
+}
+
+bool site_light_is_off(void) { return light_off; }
+
 static int site_light(const char *arg, char *out, size_t cap) {
     bool off = !strcasecmp(arg, "off");
     if (!off && strcasecmp(arg, "on")) { snprintf(out, cap, "SITE LIGHT on|off"); return 501; }
-    if (R_FAILED(gspLcdInit())) { snprintf(out, cap, "gsp::Lcd unavailable"); return 550; }
-    Result r = off ? GSPLCD_PowerOffBacklight(GSPLCD_SCREEN_BOTH) : GSPLCD_PowerOnBacklight(GSPLCD_SCREEN_BOTH);
-    gspLcdExit();
-    if (R_FAILED(r)) { snprintf(out, cap, "Backlight failed %08lX", r); return 550; }
-    light_off = off;
+    if (!site_set_light(off)) { snprintf(out, cap, "Backlight failed, see SITE LOG"); return 550; }
     snprintf(out, cap, "Backlight %s", off ? "off" : "on");
     return 200;
 }
@@ -208,6 +215,7 @@ static const char HELP[] =
     "SITE LAUNCH <id> Relay app only: arm broadcast, start the title\n"
     "SITE PLAY        plugin only: leave the plugin screen, boot the game\n"
     "SITE SYNC | SITE INBOX | SITE UPDATE  Relay app only: the menu rows, result in SITE LOG\n"
+    "SITE CLOCK       Relay app only: set the clock from NTP, result in SITE LOG\n"
     "SITE REBOOT | SITE POWEROFF\n"
     "STOR /install/<name>.cia  Relay app only: installs, nothing written to the card";
 
@@ -223,9 +231,10 @@ static int site(char *arg, char *out, size_t cap) {
     if (!strcasecmp(arg, "LAUNCH")) return site_launch(rest, out, cap);
     if (!strcasecmp(arg, "REBOOT")) return request(SITE_REBOOT, "Rebooting", out, cap);
     if (!strcasecmp(arg, "POWEROFF")) return request(SITE_POWEROFF, "Powering off", out, cap);
-    if (!strcasecmp(arg, "SYNC") || !strcasecmp(arg, "INBOX") || !strcasecmp(arg, "UPDATE")) {
+    if (!strcasecmp(arg, "SYNC") || !strcasecmp(arg, "INBOX") || !strcasecmp(arg, "UPDATE") || !strcasecmp(arg, "CLOCK")) {
         if (!is_app) { snprintf(out, cap, "In a game; needs the Relay app"); return 550; }
-        site_req_t r = !strcasecmp(arg, "SYNC") ? SITE_SYNC : !strcasecmp(arg, "INBOX") ? SITE_INBOX : SITE_UPDATE;
+        site_req_t r = !strcasecmp(arg, "SYNC") ? SITE_SYNC : !strcasecmp(arg, "INBOX") ? SITE_INBOX
+                     : !strcasecmp(arg, "CLOCK") ? SITE_CLOCK : SITE_UPDATE;
         __atomic_store_n(&pending, r, __ATOMIC_RELEASE);
         snprintf(out, cap, "Started; SITE LOG shows the result");
         return 200;

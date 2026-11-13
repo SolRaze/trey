@@ -213,7 +213,9 @@ AccessControlInfo:
    - boss:U
    - cam:u
    - cecd:u
+   - cfg:i
    - cfg:nor
+   - cfg:s
    - cfg:u
    - csnd:SND
    - dsp::DSP

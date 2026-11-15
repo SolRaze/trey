@@ -2,6 +2,7 @@
  * Runs on FTP session threads: anything that must happen after the reply goes out, or on the
  * main thread, is left as a request for site_take. */
 #include <3ds.h>
+#include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,21 +18,39 @@
 
 static bool is_app;
 static volatile bool light_off;
+/* One request waits at a time. A verb claims the slot as SITE_HOLD, fills its arguments, then posts;
+ * site_take copies the arguments out before it frees the slot, so neither side sees them half-written. */
+#define SITE_HOLD ((site_req_t)-1)
 static volatile site_req_t pending;
 static u64 pending_title;
 static u8 pending_media;
+static char pending_text[2][256], taken_text[2][256];
+
+const char *site_text(int i) { return taken_text[i]; }
 
 site_req_t site_take(u64 *title, u8 *media) {
-    site_req_t r = __atomic_exchange_n(&pending, SITE_IDLE, __ATOMIC_ACQ_REL);
-    if (r == SITE_LAUNCH) { *title = pending_title; *media = pending_media; }
+    site_req_t r = __atomic_load_n(&pending, __ATOMIC_ACQUIRE);
+    if (r == SITE_IDLE || r == SITE_HOLD) return SITE_IDLE;
+    *title = pending_title;
+    *media = pending_media;
+    memcpy(taken_text, pending_text, sizeof(taken_text));
+    __atomic_store_n(&pending, SITE_IDLE, __ATOMIC_RELEASE);
     return r;
+}
+
+/* False with the reply in out while an earlier request still waits for the main loop; answer 450. */
+static bool claim(char *out, size_t cap) {
+    site_req_t idle = SITE_IDLE;
+    if (__atomic_compare_exchange_n(&pending, &idle, SITE_HOLD, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return true;
+    snprintf(out, cap, "Busy with an earlier request, try again");
+    return false;
 }
 
 void site_power(site_req_t req) {
     if (R_FAILED(ptmSysmInit())) { ftp_log("ptm:sysm unavailable"); return; }
     Result r = req == SITE_REBOOT ? PTMSYSM_RebootAsync(0) : PTMSYSM_ShutdownAsync(0);
     ptmSysmExit();
-    ftp_log("%s failed %08lX", req == SITE_REBOOT ? "reboot" : "poweroff", r);
+    if (R_FAILED(r)) ftp_log("%s failed %08lX", req == SITE_REBOOT ? "reboot" : "poweroff", r);
 }
 
 /* ---- screenshots ---- */
@@ -152,7 +171,7 @@ static size_t list_titles(FS_MediaType media, const char *where, char *out, size
     if (R_SUCCEEDED(AM_GetTitleList(&read, media, count, ids))) {
         for (u32 i = 0; i < read && n < cap - 64; i++) {
             if ((ids[i] >> 32) != 0x00040000) continue;   /* applications only */
-            char code[16] = { 0 };
+            char code[17] = { 0 };   /* AM fills 16 with no terminator */
             AM_GetTitleProductCode(media, ids[i], code);
             n += snprintf(out + n, cap - n, "%s%016llX %s %s", n ? "\n" : "", ids[i], where, code);
         }
@@ -165,7 +184,9 @@ static int site_titles(char *out, size_t cap) {
     if (R_FAILED(amInit())) { snprintf(out, cap, "AM unavailable"); return 550; }
     size_t n = list_titles(MEDIATYPE_SD, "sd", out, cap);
     if (n) { out[n++] = '\n'; out[n] = '\0'; }
-    n += list_titles(MEDIATYPE_GAME_CARD, "card", out + n, cap - n);
+    size_t card = list_titles(MEDIATYPE_GAME_CARD, "card", out + n, cap - n);
+    if (card) n += card;
+    else if (n) out[--n] = '\0';   /* no card: drop the separator */
     amExit();
     if (!n) snprintf(out, cap, "No titles");
     return 200;
@@ -191,15 +212,81 @@ static int site_launch(const char *arg, char *out, size_t cap) {
     if (!*arg || *end) { snprintf(out, cap, "SITE LAUNCH <16 hex digit title id>; SITE TITLES lists them"); return 501; }
     u8 media;
     if (!title_media(tid, &media)) { snprintf(out, cap, "%016llX not installed", tid); return 550; }
+    if (!claim(out, cap)) return 450;
     pending_title = tid;
     pending_media = media;
     __atomic_store_n(&pending, SITE_LAUNCH, __ATOMIC_RELEASE);
     ftp_log("launch %016llX", tid);
-    snprintf(out, cap, "Arming broadcast, then starting %016llX; FTP returns as \"trey broadcast\"", tid);
+    u64 self = 0;
+    APT_GetProgramID(&self);
+    if (tid == self) snprintf(out, cap, "Relaunching Relay; FTP returns as \"trey relay\"");
+    else snprintf(out, cap, "Arming broadcast, then starting %016llX; FTP returns as \"trey broadcast\"", tid);
+    return 200;
+}
+
+/* The main loop uninstalls: it holds the kept list and the SMDH names. */
+static int site_uninstall(const char *arg, char *out, size_t cap) {
+    if (!is_app) { snprintf(out, cap, "In a game; needs the Relay app"); return 550; }
+    char *end;
+    u64 tid = strtoull(arg, &end, 16);
+    if (!*arg || *end) { snprintf(out, cap, "SITE UNINSTALL <16 hex digit title id>; SITE TITLES lists them"); return 501; }
+    if (!claim(out, cap)) return 450;
+    pending_title = tid;
+    __atomic_store_n(&pending, SITE_UNINSTALL, __ATOMIC_RELEASE);
+    snprintf(out, cap, "Started; SITE LOG shows the result");
+    return 200;
+}
+
+/* %XX escapes decoded in place, so names and passwords can carry spaces. A % without two hex
+ * digits stays as it is. */
+static void unescape(char *s) {
+    char *o = s;
+    for (; *s; s++) {
+        if (*s == '%' && isxdigit((unsigned char)s[1]) && isxdigit((unsigned char)s[2])) {
+            char hex[3] = { s[1], s[2], '\0' };
+            *o++ = (char)strtoul(hex, NULL, 16);
+            s += 2;
+        } else *o++ = *s;
+    }
+    *o = '\0';
+}
+
+static int site_fetch(const char *arg, char *out, size_t cap) {
+    if (!is_app) { snprintf(out, cap, "In a game; needs the Relay app"); return 550; }
+    if (strncasecmp(arg, "http://", 7) && strncasecmp(arg, "https://", 8)) { snprintf(out, cap, "SITE FETCH <http(s) url of a CIA>"); return 501; }
+    if (strlen(arg) >= sizeof(pending_text[0])) { snprintf(out, cap, "URL too long"); return 501; }
+    if (!claim(out, cap)) return 450;
+    snprintf(pending_text[0], sizeof(pending_text[0]), "%s", arg);
+    __atomic_store_n(&pending, SITE_FETCH, __ATOMIC_RELEASE);
+    snprintf(out, cap, "Started; SITE LOG shows the result");
+    return 200;
+}
+
+/* SITE WIFI <1-3> <name> [password], each %XX-escaped. Saving cycles Wi-Fi: FTP drops for about 10 s. */
+static int site_wifi(char *arg, char *out, size_t cap) {
+    if (!is_app) { snprintf(out, cap, "In a game; needs the Relay app"); return 550; }
+    char *name = strchr(arg, ' ');
+    if (name) while (*name == ' ') *name++ = '\0';
+    char *pass = name ? strchr(name, ' ') : NULL;
+    if (pass) while (*pass == ' ') *pass++ = '\0';
+    int slot = atoi(arg);
+    if (slot < 1 || slot > 3 || !name || !*name || strlen(name) > 96 || (pass && strlen(pass) > 192)) {
+        snprintf(out, cap, "SITE WIFI <1-3> <name> [password], %%XX-escaped, no password = open network");
+        return 501;
+    }
+    if (!claim(out, cap)) return 450;
+    snprintf(pending_text[0], sizeof(pending_text[0]), "%s", name);
+    snprintf(pending_text[1], sizeof(pending_text[1]), "%s", pass ? pass : "");
+    unescape(pending_text[0]);
+    unescape(pending_text[1]);
+    pending_title = slot - 1;
+    __atomic_store_n(&pending, SITE_WIFI, __ATOMIC_RELEASE);
+    snprintf(out, cap, "Saving connection %d, then connecting; FTP drops for about 10 s, SITE LOG shows the result", slot);
     return 200;
 }
 
 static int request(site_req_t r, const char *what, char *out, size_t cap) {
+    if (!claim(out, cap)) return 450;
     __atomic_store_n(&pending, r, __ATOMIC_RELEASE);
     ftp_log("%s", what);
     snprintf(out, cap, "%s; FTP goes down", what);
@@ -213,6 +300,9 @@ static const char HELP[] =
     "SITE LIGHT on|off  backlight, both screens\n"
     "SITE TITLES      installed applications: id medium product code\n"
     "SITE LAUNCH <id> Relay app only: arm broadcast, start the title\n"
+    "SITE UNINSTALL <id>  Relay app only: SD application, relay FBI 3hs refused, result in SITE LOG\n"
+    "SITE FETCH <url> Relay app only: downloads and installs a CIA, result in SITE LOG\n"
+    "SITE WIFI <1-3> <name> [password]  Relay app only: %XX-escaped, saves the connection and connects\n"
     "SITE PLAY        plugin only: leave the plugin screen, boot the game\n"
     "SITE SYNC | SITE INBOX | SITE UPDATE  Relay app only: the menu rows, result in SITE LOG\n"
     "SITE CLOCK       Relay app only: set the clock from NTP, result in SITE LOG\n"
@@ -229,12 +319,16 @@ static int site(char *arg, char *out, size_t cap) {
     if (!strcasecmp(arg, "LIGHT")) return site_light(rest, out, cap);
     if (!strcasecmp(arg, "TITLES")) return site_titles(out, cap);
     if (!strcasecmp(arg, "LAUNCH")) return site_launch(rest, out, cap);
+    if (!strcasecmp(arg, "FETCH")) return site_fetch(rest, out, cap);
+    if (!strcasecmp(arg, "WIFI")) return site_wifi(rest, out, cap);
+    if (!strcasecmp(arg, "UNINSTALL")) return site_uninstall(rest, out, cap);
     if (!strcasecmp(arg, "REBOOT")) return request(SITE_REBOOT, "Rebooting", out, cap);
     if (!strcasecmp(arg, "POWEROFF")) return request(SITE_POWEROFF, "Powering off", out, cap);
     if (!strcasecmp(arg, "SYNC") || !strcasecmp(arg, "INBOX") || !strcasecmp(arg, "UPDATE") || !strcasecmp(arg, "CLOCK")) {
         if (!is_app) { snprintf(out, cap, "In a game; needs the Relay app"); return 550; }
         site_req_t r = !strcasecmp(arg, "SYNC") ? SITE_SYNC : !strcasecmp(arg, "INBOX") ? SITE_INBOX
                      : !strcasecmp(arg, "CLOCK") ? SITE_CLOCK : SITE_UPDATE;
+        if (!claim(out, cap)) return 450;
         __atomic_store_n(&pending, r, __ATOMIC_RELEASE);
         snprintf(out, cap, "Started; SITE LOG shows the result");
         return 200;
@@ -249,14 +343,17 @@ static int site(char *arg, char *out, size_t cap) {
 /* ---- CIA install sink ---- */
 
 typedef struct { Handle h; u64 off; } cia_t;
+static volatile bool installing;   /* one at a time: FTP sessions and the main loop both install */
 
 void *cia_begin(const char **err) {
-    if (R_FAILED(amInit())) { *err = "AM unavailable"; return NULL; }
+    if (__atomic_exchange_n(&installing, true, __ATOMIC_ACQ_REL)) { *err = "Another install is running"; return NULL; }
+    if (R_FAILED(amInit())) { installing = false; *err = "AM unavailable"; return NULL; }
     cia_t *c = calloc(1, sizeof(*c));
     Result r = c ? AM_StartCiaInstall(MEDIATYPE_SD, &c->h) : -1;
     if (R_FAILED(r)) {
         free(c);
         amExit();
+        installing = false;
         ftp_log("AM_StartCiaInstall %08lX", r);
         *err = "Installer refused to start";
         return NULL;
@@ -287,6 +384,7 @@ const char *cia_end(void *ctx, int ok) {
     Result r = ok ? AM_FinishCiaInstall(c->h) : AM_CancelCIAInstall(c->h);
     free(c);
     amExit();
+    installing = false;
     if (!ok) return "Install cancelled";
     if (R_FAILED(r)) {
         snprintf(why, sizeof(why), "Install failed %08lX", r);

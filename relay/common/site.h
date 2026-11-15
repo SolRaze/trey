@@ -7,13 +7,16 @@ extern "C" {
 #endif
 
 /* Requests SITE hands to the main loop: power and app jumps run there, after the reply went out. */
-typedef enum { SITE_IDLE, SITE_REBOOT, SITE_POWEROFF, SITE_LAUNCH, SITE_PLAY, SITE_SYNC, SITE_INBOX, SITE_UPDATE, SITE_CLOCK } site_req_t;
+typedef enum { SITE_IDLE, SITE_REBOOT, SITE_POWEROFF, SITE_LAUNCH, SITE_PLAY, SITE_SYNC, SITE_INBOX, SITE_UPDATE, SITE_CLOCK, SITE_UNINSTALL, SITE_FETCH, SITE_WIFI } site_req_t;
 
 /* Registers the SITE verbs and the STOR sink with ftp.c; call before ftp_start.
  * app: the launcher (LAUNCH, CIA install), else the plugin (PLAY, install refused). */
 void site_init(bool app);
-/* Takes the pending request, if any. title and media are set for SITE_LAUNCH. */
+/* Takes the pending request, if any. title and media are set for SITE_LAUNCH, title for SITE_UNINSTALL,
+ * title = slot 0 to 2 for SITE_WIFI. */
 site_req_t site_take(u64 *title, u8 *media);
+/* Text arguments of the last FETCH (0 = url) or WIFI (0 = network name, 1 = password); "" when unset. */
+const char *site_text(int i);
 /* Both backlights; SITE LIGHT and the app's idle screen-off share this one state, so STAT reports
  * either and a button press in the app undoes either. False when gsp::Lcd refused. */
 bool site_set_light(bool off);

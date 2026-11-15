@@ -11,7 +11,7 @@ struct Wifi {
     u8 state;            // shared page network_state, raw; logged on page open
     char ssid[33];       // connected network, "" when none
     const char* security;
-    char slot[3][33];    // saved slot names, "" when empty; slotsRead false when ac:i refused
+    char slot[3][33];    // saved slot names, "" when empty; slotsRead false when cfg refused
     bool slotsRead;
 };
 
@@ -21,8 +21,14 @@ void wifiExit();
 // Cheap: AC status, SSID, bars. Called once a second.
 void wifiPoll(Wifi& w);
 
-// Reads the three saved slot names over ac:i. On page open only.
+// Reads the three saved slot names from the config blocks. On page open only.
 void wifiReadSlots(Wifi& w);
+
+// Asks for a network name and password on the software keyboard and saves them as that slot,
+// WPA2 AES, or open when the password is empty. Other slot settings (IP, proxy) stay. msg says how it went.
+bool wifiEditSlot(int slot, char* msg, size_t cap);
+// Same save without the keyboard, for SITE WIFI.
+bool wifiSaveSlot(int slot, const char* ssid, const char* pass, char* msg, size_t cap);
 
 // Wireless off, on, then AC connect to that slot only. Blocks up to 20 s; msg says how it went.
 bool wifiConnect(int slot, char* msg, size_t cap);
@@ -30,5 +36,5 @@ bool wifiConnect(int slot, char* msg, size_t cap);
 // Wireless radio on or off, as the HOME Menu toggle does. FTP drops while off.
 bool wifiRadio(bool on, char* msg, size_t cap);
 
-// System Settings for this region, for changing or adding networks; 0 when the region is unknown.
+// System Settings for this region, for proxy, IP and other settings; 0 when the region is unknown.
 u64 settingsTitle();

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #ifdef __cplusplus
@@ -13,8 +14,9 @@ extern "C" {
 /* Starts the listener thread. socInit must already have run. prio: thread priority, larger = lower.
  * banner: 220 greeting text; Azahar's launcher tells app from plugin by it. */
 int ftp_start(int prio, const char *banner);
-/* Stops the listener and every session, then joins them. */
-void ftp_stop(void);
+/* Stops the listener and waits up to 10 s for every session to leave. false: a session is still
+ * running, so socExit must not run, else its next socket call reads a removed devoptab and crashes. */
+bool ftp_stop(void);
 /* Open sessions. */
 int ftp_sessions(void);
 

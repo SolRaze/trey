@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "build.h"
 #include "cacert_pem.h"
@@ -25,6 +26,8 @@ static CURL* easy(const char* url) {
     curl_easy_setopt(c, CURLOPT_USERAGENT, "relay/" RELAY_BUILD);
     curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
+    // An https download stays https through its redirects.
+    curl_easy_setopt(c, CURLOPT_REDIR_PROTOCOLS_STR, strncasecmp(url, "https:", 6) ? "http,https" : "https");
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 10L);
     curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1L);     // a stalled transfer ends after 20 s
     curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 20L);

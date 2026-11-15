@@ -34,19 +34,21 @@ static int tzMinutes() {
 static long long ntpNow() {
     struct hostent* h = gethostbyname("pool.ntp.org");
     if (!h || !h->h_addr_list[0]) { ftp_log("clock: pool.ntp.org did not resolve"); return 0; }
-    struct sockaddr_in a = {};
-    a.sin_family = AF_INET;
-    a.sin_port = htons(123);
-    memcpy(&a.sin_addr, h->h_addr_list[0], 4);
     int s = socket(AF_INET, SOCK_DGRAM, 0);
     if (s < 0) return 0;
     fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
-    u8 pkt[48] = { 0x1B };   // version 3, client
     long long ms = 0;
-    if (sendto(s, pkt, sizeof(pkt), 0, (struct sockaddr*)&a, sizeof(a)) == sizeof(pkt)) {
-        for (int i = 0; i < 30 && !ms; i++) {
+    // Each pool address in turn, 1.5 s apiece: one can be down or answer a rate-limit kiss (stratum 0).
+    for (int n = 0; n < 4 && h->h_addr_list[n] && !ms; n++) {
+        struct sockaddr_in a = {};
+        a.sin_family = AF_INET;
+        a.sin_port = htons(123);
+        memcpy(&a.sin_addr, h->h_addr_list[n], 4);
+        u8 pkt[48] = { 0x1B };   // version 3, client
+        if (sendto(s, pkt, sizeof(pkt), 0, (struct sockaddr*)&a, sizeof(a)) != sizeof(pkt)) continue;
+        for (int i = 0; i < 15 && !ms; i++) {
             svcSleepThread(100000000LL);
-            if (recv(s, pkt, sizeof(pkt), 0) < 48) continue;
+            if (recv(s, pkt, sizeof(pkt), 0) < 48 || (pkt[0] & 7) != 4 || !pkt[1]) continue;   // server reply, synchronised
             u32 sec = (u32)pkt[40] << 24 | pkt[41] << 16 | pkt[42] << 8 | pkt[43];
             u32 frac = (u32)pkt[44] << 24 | pkt[45] << 16 | pkt[46] << 8 | pkt[47];
             if (sec) ms = sec * 1000LL + (((u64)frac * 1000) >> 32);

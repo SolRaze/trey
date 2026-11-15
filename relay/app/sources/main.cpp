@@ -7,6 +7,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <vector>
 
 #include "arm.hpp"
@@ -14,6 +15,7 @@
 #include "inbox.hpp"
 #include "net.hpp"
 #include "saves.hpp"
+#include "titles.hpp"
 #include "update.hpp"
 #include "wifi.hpp"
 #include "ftp.h"
@@ -72,24 +74,27 @@ static void saveTheme(int i) {
 static const int TOP_W = 400, BOT_W = 320;
 static const int MARGIN = 24;
 
-// Bottom screen menu: one line per row, the selected row's description or result below them.
-// Touch hits the whole row. Pages share the layout: main; Wi-Fi and Saves under it, Backups under
-// Saves (B back). At most VIS rows show; longer lists scroll under their first PINNED rows.
+// Bottom screen menu: one line per row, the selected row's description or result below them. Main and
+// Settings draw as icon tiles instead, see drawTiles.
+// Touch hits the whole row. Pages: main; Saves, Titles and Settings under it; Backups under Saves; Wi-Fi
+// under Settings (B back). At most VIS rows show; longer lists scroll under their first PINNED rows.
 static const int ROW_TOP = 8, ROW_H = 25, GROUP_GAP = 6, DESC_Y = 182, VIS = 6, MAX_ROWS = 128;
-enum { ITEM_BROADCAST, ITEM_SAVES, ITEM_INBOX, ITEM_WIFI, ITEM_UPDATE, ITEM_THEME, ITEM_COUNT };
-static const char* ITEM_TITLE[] = { "Broadcast a game", "Saves", "Install from inbox", "Wi-Fi", "Update", "Theme" };
-enum { WIFI_SLOT1, WIFI_SLOT2, WIFI_SLOT3, WIFI_RADIO, WIFI_SETTINGS, WIFI_CLOCK, WIFI_COUNT };
-// Bit i set = a group starts at visible row i. Main: Broadcast | Saves, Inbox | Wi-Fi, Update, Theme.
-// Wi-Fi: the three connections | radio, settings, clock. Saves: Sync now | titles.
-static const u32 MAIN_GROUPS = BIT(ITEM_SAVES) | BIT(ITEM_WIFI), WIFI_GROUPS = BIT(WIFI_RADIO), SAVES_GROUPS = BIT(1);
-static u32 groups = MAIN_GROUPS;
+enum { ITEM_BROADCAST, ITEM_SAVES, ITEM_TITLES, ITEM_INBOX, ITEM_SETTINGS, ITEM_COUNT };
+static const char* ITEM_TITLE[] = { "Broadcast a game", "Saves", "Titles", "Inbox", "Settings" };
+enum { SET_WIFI, SET_UPDATE, SET_THEME, SET_CLOCK, SET_COUNT };
+static const char* SET_TITLE[] = { "Wi-Fi", "Update", "Theme", "Clock" };
+enum { WIFI_SLOT1, WIFI_SLOT2, WIFI_SLOT3, WIFI_RADIO, WIFI_SETTINGS, WIFI_COUNT };
+// Bit i set = a group starts at visible row i. Wi-Fi: the three connections | radio, settings.
+// Saves: Sync now | titles.
+static const u32 WIFI_GROUPS = BIT(WIFI_RADIO), SAVES_GROUPS = BIT(1);
+static u32 groups = 0;
 static int rowY(int i) {
     int y = ROW_TOP + i * ROW_H;
     for (int k = 1; k <= i; k++) if (groups & BIT(k)) y += GROUP_GAP;
     return y;
 }
 
-struct Row { const char* title; const char* desc; bool enabled; bool mark; };
+struct Row { const char* title; const char* desc; bool enabled; bool mark; int icon = -1; };   // icon: tile pages
 
 static C2D_TextBuf textBuf;
 static C2D_TextBuf measureBuf;  // cleared per measurement so long paths never fill textBuf
@@ -335,10 +340,18 @@ static void drawSavesTop(const Screen& s, const SaveTitle* t, int titles, const 
         formatWhen(when, sizeof(when), t->synced);
         snprintf(line, sizeof(line), "Copy from %s", when);
     } else {
-        snprintf(line, sizeof(line), "Checkpoint backups only");
+        snprintf(line, sizeof(line), "Never synced");
     }
     text(MARGIN, 152, 0.55f, T->grey, line);
     text(MARGIN, 176, 0.5f, T->dim, t->ext ? "Save and extdata" : "Save");
+}
+
+// Selected item's description or result, then the button prompt.
+static void footer(const char* desc, const char* prompt) {
+    char line[128];
+    fitTail(line, sizeof(line), desc, 0.46f, BOT_W - 2 * MARGIN);
+    text(MARGIN, DESC_Y, 0.46f, T->grey, line);
+    text(MARGIN, 212, 0.45f, T->grey, prompt);
 }
 
 // vis maps each visible slot to its row; light is per slot.
@@ -361,9 +374,131 @@ static void drawBottom(const Row* rows, int count, int pinned, const int* vis, i
         C2D_DrawRectSolid(BOT_W - 6, y0, 0, 2, h, T->dim);
         C2D_DrawRectSolid(BOT_W - 6, y0 + h * (vis[pinned] - pinned) / list, 0, 2, h * shown / list, T->grey);
     }
-    fitTail(line, sizeof(line), rows[selected].desc, 0.46f, BOT_W - 2 * MARGIN);
-    text(MARGIN, DESC_Y, 0.46f, T->grey, line);
-    text(MARGIN, 212, 0.45f, T->grey, prompt);
+    footer(rows[selected].desc, prompt);
+}
+
+// Tile pages, Main and Settings: a 2-column grid of icon tiles, row-major, so each page fits without
+// scrolling. Main keeps Broadcast as a full row above its grid; Settings has a page title there instead.
+// tileAt and the d-pad moves read this layout.
+static const int GRID_X = 16, GRID_Y = 42, TILE_GAP = 6, GRID_COLS = 2, TILE_H = 60;
+static const int TILE_W = (BOT_W - 2 * GRID_X - (GRID_COLS - 1) * TILE_GAP) / GRID_COLS;
+// k: index into the page's tiles, row 0 of the grid first.
+static void tileXY(int k, int* x, int* y) {
+    *x = GRID_X + (k % GRID_COLS) * (TILE_W + TILE_GAP);
+    *y = GRID_Y + (k / GRID_COLS) * (TILE_H + TILE_GAP);
+}
+// Row under a touch on a tile page, -1 for none. first: rows before the tiles, 1 on Main.
+static int tileAt(int first, int count, int px, int py) {
+    if (first && py >= rowY(0) && py < rowY(0) + ROW_H) return 0;
+    for (int i = first; i < count; i++) {
+        int x, y;
+        tileXY(i - first, &x, &y);
+        if (px >= x && px < x + TILE_W && py >= y && py < y + TILE_H) return i;
+    }
+    return -1;
+}
+
+// Icon strokes. memcard borders them in black like its glyphs.
+static void ink(float x, float y, float w, float h, u32 c) {
+    if (T->outline) C2D_DrawRectSolid(x - 1, y - 1, 0, w + 2, h + 2, C2D_Color32(0, 0, 0, 255));
+    C2D_DrawRectSolid(x, y, 0, w, h, c);
+}
+static void inkTri(float x0, float y0, float x1, float y1, float x2, float y2, u32 c) {
+    if (T->outline) {
+        u32 k = C2D_Color32(0, 0, 0, 255);
+        float cx = (x0 + x1 + x2) / 3, cy = (y0 + y1 + y2) / 3, g = 1.3f;
+        C2D_DrawTriangle(cx + (x0 - cx) * g, cy + (y0 - cy) * g, k, cx + (x1 - cx) * g, cy + (y1 - cy) * g, k,
+                         cx + (x2 - cx) * g, cy + (y2 - cy) * g, k, 0);
+    }
+    C2D_DrawTriangle(x0, y0, c, x1, y1, c, x2, y2, c, 0);
+}
+// Arc of radius r from angle a0 sweeping `sweep` radians clockwise. Every border before any colour, else
+// each segment's border cuts the one drawn before it.
+static void arc(float cx, float cy, float r, float a0, float sweep, u32 c) {
+    const int N = 12;
+    for (int pass = T->outline ? 0 : 1; pass < 2; pass++) {
+        u32 k = pass ? c : C2D_Color32(0, 0, 0, 255);
+        for (int j = 0; j < N; j++) {
+            float a = a0 - sweep * j / N, b = a0 - sweep * (j + 1) / N;
+            C2D_DrawLine(cx + r * cosf(a), cy - r * sinf(a), k, cx + r * cosf(b), cy - r * sinf(b), k, pass ? 2 : 4, 0);
+        }
+    }
+}
+
+enum { IC_NONE = -1, IC_SAVES, IC_TITLES, IC_INBOX, IC_SETTINGS, IC_WIFI, IC_UPDATE, IC_THEME, IC_CLOCK };
+
+// 24x24 icons drawn from primitives at (x, y).
+static void icon(int id, float x, float y, u32 c, int strength) {
+    switch (id) {
+    case IC_SAVES:      // memory card: frame and label
+        ink(x + 4, y + 1, 16, 2, c); ink(x + 4, y + 21, 16, 2, c);
+        ink(x + 4, y + 1, 2, 22, c); ink(x + 18, y + 1, 2, 22, c);
+        ink(x + 8, y + 5, 8, 6, c);
+        break;
+    case IC_TITLES:     // four app squares
+        for (int k = 0; k < 4; k++) ink(x + 2 + (k % 2) * 11, y + 2 + (k / 2) * 11, 9, 9, c);
+        break;
+    case IC_INBOX:      // arrow into a tray
+        ink(x + 11, y + 1, 2, 9, c);
+        inkTri(x + 6, y + 9, x + 18, y + 9, x + 12, y + 16, c);
+        ink(x + 2, y + 21, 20, 2, c); ink(x + 2, y + 14, 2, 9, c); ink(x + 20, y + 14, 2, 9, c);
+        break;
+    case IC_SETTINGS:   // three sliders
+        for (int k = 0; k < 3; k++) ink(x + 2, y + 4 + k * 8, 20, 2, c);
+        ink(x + 14, y + 2, 4, 6, c); ink(x + 5, y + 10, 4, 6, c); ink(x + 11, y + 18, 4, 6, c);
+        break;
+    case IC_WIFI:       // HOME Menu bars, lit by the live strength
+        for (int k = 0; k < 3; k++) ink(x + 3 + k * 7, y + 16 - k * 6, 5, 7 + k * 6, k < strength ? c : T->dim);
+        break;
+    case IC_UPDATE: {   // circular arrow, head at the open end pointing clockwise
+        const float r = 9, cx = x + 12, cy = y + 12, a0 = 0.7f;
+        arc(cx, cy, r, a0 + 2 * M_PI - 1.4f, 2 * M_PI - 1.4f, c);
+        float ex = cx + r * cosf(a0), ey = cy - r * sinf(a0);
+        inkTri(ex - 5, ey - 2, ex + 5, ey - 2, ex, ey + 5, c);
+        break;
+    }
+    case IC_THEME:      // the theme's own swatches
+        ink(x + 2, y + 4, 6, 16, T->white); ink(x + 9, y + 4, 6, 16, T->live); ink(x + 16, y + 4, 6, 16, T->sel);
+        break;
+    case IC_CLOCK:      // face and two hands
+        arc(x + 12, y + 12, 10, 0, 2 * M_PI, c);
+        ink(x + 11, y + 5, 2, 8, c); ink(x + 11, y + 11, 6, 2, c);
+        break;
+    }
+}
+
+// first: 1 when a full row (Broadcast) sits above the tiles, 0 when the page title does.
+static void drawTiles(const Row* rows, int count, int first, const char* pageTitle, int selected, const float* light,
+                      bool locked, const char* prompt, int strength) {
+    char line[128];
+    if (!first) text(MARGIN, rowY(0) + 5, 0.58f, T->grey, pageTitle);
+    for (int i = 0; i < count; i++) {
+        const Row& r = rows[i];
+        bool on = i == selected && !locked;
+        u32 c = on ? T->sel : r.enabled ? T->idle : T->dim;
+        if (i < first) {
+            if (!T->outline) streak(rowY(0), ROW_H, light[0]);
+            fitHead(line, sizeof(line), r.title, 0.58f, BOT_W - 2 * MARGIN);
+            text(MARGIN, rowY(0) + 5, 0.58f, c, line);
+            continue;
+        }
+        int x, y;
+        tileXY(i - first, &x, &y);
+        // Tile face: faint in both themes so it reads as a button; mono lights the selected one.
+        C2D_DrawRectSolid(x, y, 0, TILE_W, TILE_H, T->outline ? C2D_Color32(0, 0, 0, 40) : C2D_Color32(255, 255, 255, 8));
+        if (!T->outline && light[i] > 0.01f) {
+            u32 face = C2D_Color32(255, 255, 255, (u8)(light[i] * 30)), edge = C2D_Color32(255, 255, 255, (u8)(light[i] * 70));
+            C2D_DrawRectSolid(x, y, 0, TILE_W, TILE_H, face);
+            C2D_DrawRectSolid(x, y, 0, TILE_W, 1, edge);
+            C2D_DrawRectSolid(x, y + TILE_H - 1, 0, TILE_W, 1, edge);
+            C2D_DrawRectSolid(x, y, 0, 1, TILE_H, edge);
+            C2D_DrawRectSolid(x + TILE_W - 1, y, 0, 1, TILE_H, edge);
+        }
+        icon(r.icon, x + (TILE_W - 24) / 2, y + 9, c, strength);
+        fitHead(line, sizeof(line), r.title, 0.5f, TILE_W - 8);
+        text(x + TILE_W / 2, y + 38, 0.5f, c, line, C2D_AlignCenter);
+    }
+    footer(rows[selected].desc, prompt);
 }
 
 int main(int argc, char* argv[]) {
@@ -389,8 +524,11 @@ int main(int argc, char* argv[]) {
     char updateMsg[96] = "Checks GitHub for a newer build";
     char pageMsg[96] = "";
     char themeMsg[48], wifiRow[64], slotRow[3][48], slotDesc[3][48], clockDesc[80];
-    // Jobs block: the row shows its "working" line for one frame, the job runs on the next.
-    enum class Job { None, Sync, Inbox, Update, Check, Radio, Restore, Clock } job = Job::None;
+    // Jobs block: the row shows its "working" line for one frame, the job runs on the next. Queued in
+    // order, each kind once, so a SITE request and a row pressed in the same frame both run.
+    enum class Job { Sync, Inbox, Update, Check, Radio, Restore, Clock };
+    std::vector<Job> jobs;
+    auto queue = [&](Job j) { if (std::find(jobs.begin(), jobs.end(), j) == jobs.end()) jobs.push_back(j); };
     char clockMsg[96] = "";
     bool checkAfterClock = false;   // launch: a wrong clock fails TLS, so it is set before the update check
     // Wi-Fi connect runs on its own thread (~10 s); the page counts the seconds meanwhile.
@@ -399,11 +537,22 @@ int main(int argc, char* argv[]) {
     static char connMsg[96];
     Thread connThread = nullptr;
     u64 connStart = 0;
+    auto startConnect = [&](int slot) {
+        connSlot = slot;
+        connBusy = true;
+        connStart = osGetTime();
+        s32 prio = 0x30;
+        svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+        connThread = threadCreate([](void*) { wifiConnect(connSlot, connMsg, sizeof(connMsg)); connBusy = false; },
+                                  nullptr, 0x4000, prio + 1, -1, false);
+        if (!connThread) { connBusy = false; snprintf(pageMsg, sizeof(pageMsg), "Could not start connecting"); }
+    };
     int jobSlot = 0;
     std::vector<SaveTitle> titles;
     std::vector<SaveBackup> backups;
     int titleSel = 0;          // Saves page row of the title whose backups show
-    int confirmRow = -1;       // Backups row waiting for its second A
+    int confirmRow = -1;       // Backups or Titles row waiting for its second A
+    std::vector<AppTitle> apps;
     char titleDesc[96];
     bool radioOn = true;   // nwm has no getter; Wi-Fi off from HOME before launch shows as on
     bool checked = false;   // the launch-time update check, once Wi-Fi is up
@@ -425,7 +574,7 @@ int main(int argc, char* argv[]) {
     pollPower(s);
     // Saves sync once at launch; it reads only the card, so Wi-Fi does not matter.
     snprintf(syncMsg, sizeof(syncMsg), "Syncing saves");
-    job = Job::Sync;
+    queue(Job::Sync);
     // Backlights go off after IDLE_OFF frames with an FTP client and no input; any input or the
     // last client leaving brings them back.
     // Backlight state lives in site.c, shared with SITE LIGHT: a press in the app lights both again.
@@ -434,9 +583,10 @@ int main(int argc, char* argv[]) {
     bool idleDark = false, idleUsed = false;   // screens off by idle; idle already spent this quiet spell
     unsigned long long lastDone = 0;
 
-    enum class Page { Main, Wifi, Saves, Backups } page = Page::Main;
-    int selected = ITEM_BROADCAST, mainSelected = ITEM_BROADCAST;
-    float light[VIS] = { 1.0f };
+    enum class Page { Main, Settings, Wifi, Saves, Backups, Titles } page = Page::Main;
+    int selected = ITEM_BROADCAST, mainSelected = ITEM_BROADCAST, setSelected = SET_WIFI;
+    const int SLOTS = ITEM_COUNT > VIS ? ITEM_COUNT : VIS;   // light per visible row, or per tile page item
+    float light[SLOTS] = { 1.0f };
     static Row rows[MAX_ROWS];
     int rowCount = 0, pinned = 0, scroll = 0;
     int frame = 0, armedFrames = 0;
@@ -445,7 +595,8 @@ int main(int argc, char* argv[]) {
     while (!quit && aptMainLoop()) {
         hidScanInput();
         u32 down = hidKeysDown();
-        down |= hidKeysDownRepeat() & (KEY_DUP | KEY_DDOWN | KEY_CPAD_UP | KEY_CPAD_DOWN);   // held = repeat, lists
+        down |= hidKeysDownRepeat() & (KEY_DUP | KEY_DDOWN | KEY_CPAD_UP | KEY_CPAD_DOWN | KEY_DLEFT | KEY_DRIGHT |
+                                       KEY_CPAD_LEFT | KEY_CPAD_RIGHT);   // held = repeat, lists and tiles
         bool input = down || hidKeysHeld();
         idleFrames = input ? 0 : idleFrames + 1;
         if (input) idleUsed = false;
@@ -462,61 +613,92 @@ int main(int argc, char* argv[]) {
             idleDark = false;
         }
 
-        // Rows for this frame's page; built before input so touch and A see the same list.
-        groups = page == Page::Main ? MAIN_GROUPS : page == Page::Wifi ? WIFI_GROUPS : page == Page::Saves ? SAVES_GROUPS : 0;
-        pinned = page == Page::Saves ? 1 : 0;
-        if (page == Page::Saves) {
-            rows[0] = { "Sync now", syncMsg, true, false };
-            rowCount = 1;
-            for (auto& t : titles) if (rowCount < MAX_ROWS) rows[rowCount++] = { t.name, titleDesc, true, false };
-        } else if (page == Page::Backups) {
-            rowCount = 0;
-            for (auto& b : backups) if (rowCount < MAX_ROWS) rows[rowCount++] = { b.label, titleDesc, true, false };
-            if (!rowCount) rows[rowCount++] = { "No backups yet", "One is kept each time a sync replaces a copy", false, false };
-        } else if (page == Page::Main) {
-            snprintf(themeMsg, sizeof(themeMsg), "%s, A for the next", T->name);
-            snprintf(wifiRow, sizeof(wifiRow), "%s", s.wifi.ap ? s.wifi.ssid : "Not connected");
-            const char* desc[ITEM_COUNT] = { "Arms Artic Base for Azahar", syncMsg, inboxMsg,
-                                             pageMsg[0] ? pageMsg : wifiRow, updateMsg, themeMsg };
-            for (int i = 0; i < ITEM_COUNT; i++) rows[i] = { ITEM_TITLE[i], desc[i], true, false };
-            rowCount = ITEM_COUNT;
-        } else {
-            for (int i = 0; i < 3; i++) {
-                const char* name = s.wifi.slot[i];
-                bool here = s.wifi.ap & BIT(i + 1);
-                bool known = !s.wifi.slotsRead || name[0];
-                snprintf(slotRow[i], sizeof(slotRow[i]), "Connection %d%s%s", i + 1,
-                         s.wifi.slotsRead ? "  " : "", s.wifi.slotsRead ? (name[0] ? name : "empty") : "");
-                snprintf(slotDesc[i], sizeof(slotDesc[i]), "%s", here ? "Connected" : known ? "A to connect, about 10 s" : "Set it up in Internet settings");
-                rows[i] = { slotRow[i], slotDesc[i], known && !here && radioOn && !connThread, here };
-            }
-            rows[WIFI_RADIO] = { radioOn ? "Turn Wi-Fi off" : "Turn Wi-Fi on", radioOn ? "FTP stops until Wi-Fi is back" : "Wi-Fi is off", !connThread, false };
-            rows[WIFI_SETTINGS] = { "Internet settings", "Opens System Settings to add or change networks", !connThread, false };
-            if (!clockMsg[0] || job != Job::Clock) {
+        // Rows for the current page. Built before input so touch and A see the same list, and again
+        // before drawing: relisting titles, backups or apps frees the names the rows point at.
+        auto buildRows = [&] {
+            groups = page == Page::Wifi ? WIFI_GROUPS : page == Page::Saves ? SAVES_GROUPS : 0;
+            pinned = page == Page::Saves ? 1 : 0;
+            if (page == Page::Saves) {
+                rows[0] = { "Sync now", syncMsg, true, false };
+                rowCount = 1;
+                for (auto& t : titles) if (rowCount < MAX_ROWS) rows[rowCount++] = { t.name, titleDesc, true, false };
+            } else if (page == Page::Backups) {
+                rowCount = 0;
+                for (auto& b : backups) if (rowCount < MAX_ROWS) rows[rowCount++] = { b.label, titleDesc, true, false };
+                if (!rowCount) rows[rowCount++] = { "No backups yet", "One is kept each time a sync replaces a copy", false, false };
+            } else if (page == Page::Titles) {
+                rowCount = 0;
+                for (auto& t : apps) if (rowCount < MAX_ROWS) rows[rowCount++] = { t.name, titleDesc, !t.kept, false };
+                if (!rowCount) rows[rowCount++] = { "No titles", "", false, false };
+            } else if (page == Page::Main) {
+                static const int ICON[ITEM_COUNT] = { IC_NONE, IC_SAVES, IC_TITLES, IC_INBOX, IC_SETTINGS };
+                const char* desc[ITEM_COUNT] = { "Arms Artic Base for Azahar", syncMsg, "Uninstall what you no longer play", inboxMsg,
+                                                 "Wi-Fi, update, theme, clock" };
+                for (int i = 0; i < ITEM_COUNT; i++) rows[i] = { ITEM_TITLE[i], desc[i], true, false, ICON[i] };
+                rowCount = ITEM_COUNT;
+            } else if (page == Page::Settings) {
+                static const int ICON[SET_COUNT] = { IC_WIFI, IC_UPDATE, IC_THEME, IC_CLOCK };
+                snprintf(themeMsg, sizeof(themeMsg), "%s, A for the next", T->name);
+                snprintf(wifiRow, sizeof(wifiRow), "%s", s.wifi.ap ? s.wifi.ssid : "Not connected");
                 time_t now = time(NULL);
                 struct tm tm;
                 gmtime_r(&now, &tm);
                 char when[32];
                 strftime(when, sizeof(when), "%d %b %Y  %H:%M", &tm);
                 snprintf(clockDesc, sizeof(clockDesc), "%s%s", when, s.ip ? ", A sets it from the internet" : ", needs Wi-Fi to set");
+                const char* desc[SET_COUNT] = { pageMsg[0] ? pageMsg : wifiRow, updateMsg, themeMsg, clockMsg[0] ? clockMsg : clockDesc };
+                for (int i = 0; i < SET_COUNT; i++) rows[i] = { SET_TITLE[i], desc[i], true, false, ICON[i] };
+                rows[SET_CLOCK].enabled = s.ip && !connThread;
+                rowCount = SET_COUNT;
+            } else {
+                for (int i = 0; i < 3; i++) {
+                    const char* name = s.wifi.slot[i];
+                    bool here = s.wifi.ap & BIT(i + 1);
+                    bool known = !s.wifi.slotsRead || name[0];
+                    snprintf(slotRow[i], sizeof(slotRow[i]), "Connection %d%s%s", i + 1,
+                             s.wifi.slotsRead ? "  " : "", s.wifi.slotsRead ? (name[0] ? name : "empty") : "");
+                    snprintf(slotDesc[i], sizeof(slotDesc[i]), "%s", here ? "Connected, Y changes it" : known ? "A connects, Y changes it" : "A sets it up");
+                    rows[i] = { slotRow[i], slotDesc[i], !connThread && (!known || (!here && radioOn)), here };
+                }
+                rows[WIFI_RADIO] = { radioOn ? "Turn Wi-Fi off" : "Turn Wi-Fi on", radioOn ? "FTP stops until Wi-Fi is back" : "Wi-Fi is off", !connThread, false };
+                rows[WIFI_SETTINGS] = { "Internet settings", "Opens System Settings for proxy and IP", !connThread, false };
+                rowCount = WIFI_COUNT;
             }
-            rows[WIFI_CLOCK] = { "Set clock", clockMsg[0] ? clockMsg : clockDesc, s.ip && !connThread, false };
-            rowCount = WIFI_COUNT;
-        }
-        if (pageMsg[0] && page != Page::Main && selected < rowCount) rows[selected].desc = pageMsg;
+            if (selected >= rowCount) selected = rowCount - 1;   // the list shrank under the selection
+            if (pageMsg[0] && page != Page::Main && page != Page::Settings) rows[selected].desc = pageMsg;
+        };
+        buildRows();
 
         int activate = -1;
         if (s.state != State::Armed) {
             if (down & KEY_START) break;
-            if (down & (KEY_DUP | KEY_CPAD_UP)) selected = (selected + rowCount - 1) % rowCount;
-            if (down & (KEY_DDOWN | KEY_CPAD_DOWN)) selected = (selected + 1) % rowCount;
-            if (down & (KEY_DUP | KEY_DDOWN | KEY_CPAD_UP | KEY_CPAD_DOWN)) { pageMsg[0] = 0; confirmRow = -1; }
+            const u32 UP = KEY_DUP | KEY_CPAD_UP, DOWN = KEY_DDOWN | KEY_CPAD_DOWN;
+            const u32 LEFT = KEY_DLEFT | KEY_CPAD_LEFT, RIGHT = KEY_DRIGHT | KEY_CPAD_RIGHT;
+            int first = page == Page::Main ? 1 : 0;   // Broadcast row above Main's grid
+            bool tiles = page == Page::Main || page == Page::Settings;
+            if (tiles) {
+                // Up from the top tile row returns to Broadcast, down from it enters the grid's first tile.
+                int k = selected - first, col = k % GRID_COLS;
+                if (selected < first) { if (down & DOWN) selected = first; }
+                else if (down & UP) selected = k >= GRID_COLS ? selected - GRID_COLS : first ? 0 : selected;
+                else if (down & DOWN) selected = selected + GRID_COLS < rowCount ? selected + GRID_COLS : selected;
+                else if ((down & LEFT) && col > 0) selected--;
+                else if ((down & RIGHT) && col < GRID_COLS - 1 && selected + 1 < rowCount) selected++;
+            } else {
+                if (down & UP) selected = (selected + rowCount - 1) % rowCount;
+                if (down & DOWN) selected = (selected + 1) % rowCount;
+            }
+            if (down & (UP | DOWN | LEFT | RIGHT)) { pageMsg[0] = clockMsg[0] = 0; confirmRow = -1; }
             if (down & KEY_A) activate = selected;
             if (down & KEY_TOUCH) {
                 touchPosition t;
                 hidTouchRead(&t);
                 if (page != Page::Main && t.py >= 205 && t.px < 200) down |= KEY_B;   // the B Back prompt
-                for (int v = 0; v < VIS && v < rowCount; v++) {
+                if (tiles) {
+                    int i = tileAt(first, rowCount, t.px, t.py);
+                    if (i >= 0) selected = activate = i;
+                }
+                for (int v = 0; v < VIS && v < rowCount && !tiles; v++) {
                     int i = v < pinned ? v : pinned + scroll + (v - pinned);
                     if (i < rowCount && t.py >= rowY(v) && t.py < rowY(v) + ROW_H) {
                         if (i != selected) confirmRow = -1;
@@ -527,17 +709,18 @@ int main(int argc, char* argv[]) {
             }
             if ((down & KEY_B) && page != Page::Main) {
                 if (page == Page::Backups) { page = Page::Saves; selected = titleSel; }
+                else if (page == Page::Wifi) { page = Page::Settings; selected = setSelected; }
                 else { page = Page::Main; selected = mainSelected; }
-                pageMsg[0] = 0;
+                pageMsg[0] = clockMsg[0] = 0;
                 confirmRow = -1;
                 activate = -1;
             }
         }
         if (activate >= 0 && !rows[activate].enabled) activate = -1;
 
-        if (job != Job::None) {
-            Job j = job;
-            job = Job::None;
+        if (!jobs.empty()) {
+            Job j = jobs.front();
+            jobs.erase(jobs.begin());
             if (j == Job::Sync) {
                 syncSaves(syncMsg, sizeof(syncMsg));
                 if (page == Page::Saves) titles = saveTitles();
@@ -550,7 +733,7 @@ int main(int argc, char* argv[]) {
                 installInbox(inboxMsg, sizeof(inboxMsg));
             } else if (j == Job::Clock) {
                 clockSync(clockMsg, sizeof(clockMsg));
-                if (checkAfterClock) { checkAfterClock = false; job = Job::Check; }
+                if (checkAfterClock) { checkAfterClock = false; queue(Job::Check); }
             } else if (j == Job::Radio) {
                 if (wifiRadio(!radioOn, pageMsg, sizeof(pageMsg))) radioOn = !radioOn;
             } else if (!netUp) {
@@ -569,11 +752,12 @@ int main(int argc, char* argv[]) {
         u64 title = 0;
         u8 media = 0;
         site_req_t req = site_take(&title, &media);
-        // SITE verbs act on main-page rows wherever the menu is.
-        int remote = req == SITE_INBOX ? ITEM_INBOX : req == SITE_UPDATE ? ITEM_UPDATE : -1;
+        // SITE verbs act on the Inbox tile and the Update tile wherever the menu is.
+        int remote = req == SITE_INBOX ? ITEM_INBOX : -1;
         int mainAct = page == Page::Main ? activate : -1;
+        int setAct = page == Page::Settings ? activate : -1;   // before any page change below
         if (remote >= 0) mainAct = remote;
-        if (req == SITE_SYNC || (page == Page::Saves && activate == 0)) { snprintf(syncMsg, sizeof(syncMsg), "Syncing saves"); job = Job::Sync; }
+        if (req == SITE_SYNC || (page == Page::Saves && activate == 0)) { snprintf(syncMsg, sizeof(syncMsg), "Syncing saves"); queue(Job::Sync); }
         if (mainAct == ITEM_SAVES) {
             mainSelected = ITEM_SAVES;
             page = Page::Saves;
@@ -585,7 +769,23 @@ int main(int argc, char* argv[]) {
             page = Page::Backups;
             selected = scroll = 0;
             confirmRow = -1;
-        } else if (page == Page::Backups && activate >= 0 && job == Job::None) {
+        } else if (mainAct == ITEM_TITLES && remote < 0) {
+            mainSelected = ITEM_TITLES;
+            page = Page::Titles;
+            apps = appTitles();
+            selected = scroll = 0;
+            confirmRow = -1;
+        } else if (page == Page::Titles && mainAct < 0 && activate >= 0 && activate < (int)apps.size() && jobs.empty()) {
+            if (confirmRow != activate) {
+                confirmRow = activate;
+                snprintf(pageMsg, sizeof(pageMsg), "A again uninstalls %.40s", apps[activate].name);
+            } else {
+                confirmRow = -1;
+                uninstallTitle(apps[activate].tid, pageMsg, sizeof(pageMsg));
+                apps = appTitles();
+                if (selected >= (int)apps.size()) selected = apps.empty() ? 0 : apps.size() - 1;
+            }
+        } else if (page == Page::Backups && activate >= 0 && jobs.empty()) {
             if (confirmRow != activate) {
                 confirmRow = activate;
                 snprintf(pageMsg, sizeof(pageMsg), "A again restores this over the console's %s", backups[activate].ext ? "extdata" : "save");
@@ -593,18 +793,25 @@ int main(int argc, char* argv[]) {
                 confirmRow = -1;
                 jobSlot = activate;
                 snprintf(pageMsg, sizeof(pageMsg), "Restoring");
-                job = Job::Restore;
+                queue(Job::Restore);
             }
         }
-        if (mainAct == ITEM_INBOX) { snprintf(inboxMsg, sizeof(inboxMsg), "Installing from inbox"); job = Job::Inbox; }
-        if (mainAct == ITEM_UPDATE) { snprintf(updateMsg, sizeof(updateMsg), "Checking GitHub"); job = Job::Update; }
-        if (mainAct == ITEM_THEME) {
+        if (mainAct == ITEM_INBOX) { snprintf(inboxMsg, sizeof(inboxMsg), "Installing from inbox"); queue(Job::Inbox); }
+        if (setAct == SET_UPDATE || req == SITE_UPDATE) { snprintf(updateMsg, sizeof(updateMsg), "Checking GitHub"); queue(Job::Update); }
+        if (setAct == SET_CLOCK) { snprintf(clockMsg, sizeof(clockMsg), "Asking pool.ntp.org"); queue(Job::Clock); }
+        if (mainAct == ITEM_SETTINGS) {
+            mainSelected = ITEM_SETTINGS;
+            page = Page::Settings;
+            selected = setSelected;
+            pageMsg[0] = 0;
+        }
+        if (setAct == SET_THEME) {
             theme = (theme + 1) % THEME_COUNT;
             T = &THEMES[theme];
             saveTheme(theme);
         }
-        if (mainAct == ITEM_WIFI && remote < 0) {
-            mainSelected = ITEM_WIFI;
+        if (setAct == SET_WIFI) {
+            setSelected = SET_WIFI;
             page = Page::Wifi;
             wifiReadSlots(s.wifi);
             selected = 0;
@@ -617,29 +824,28 @@ int main(int argc, char* argv[]) {
             if (!s.fault) { s.state = State::Armed; led_broadcast(LED_BROADCAST_WAIT); }
             ftp_log("arm: %s", s.fault ? s.fault : "ok");
         }
-        if (page == Page::Wifi && remote < 0 && activate >= 0) {
+        // setAct < 0: the press that opened this page is not also a press on it.
+        if (page == Page::Wifi && setAct < 0 && s.state != State::Armed && !connThread) {
+            // A on an empty slot or Y on any slot: keyboard for name and password, then connect to it.
+            int edit = -1;
+            if ((down & KEY_Y) && selected <= WIFI_SLOT3) edit = selected;
+            if (activate >= 0 && activate <= WIFI_SLOT3 && s.wifi.slotsRead && !s.wifi.slot[activate][0]) edit = activate;
+            if (edit >= 0) activate = wifiEditSlot(edit, pageMsg, sizeof(pageMsg)) ? edit : -1;
+            if (edit >= 0) wifiReadSlots(s.wifi);
+        }
+        if (page == Page::Wifi && setAct < 0 && activate >= 0) {
             if (activate <= WIFI_SLOT3 && !connThread) {
-                connSlot = activate;
-                connBusy = true;
-                connStart = osGetTime();
-                s32 prio = 0x30;
-                svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
-                connThread = threadCreate([](void*) { wifiConnect(connSlot, connMsg, sizeof(connMsg)); connBusy = false; },
-                                          nullptr, 0x4000, prio + 1, -1, false);
-                if (!connThread) { connBusy = false; snprintf(pageMsg, sizeof(pageMsg), "Could not start connecting"); }
-            } else if (activate == WIFI_CLOCK) {
-                snprintf(clockMsg, sizeof(clockMsg), "Asking pool.ntp.org");
-                job = Job::Clock;
+                startConnect(activate);
             } else if (activate == WIFI_RADIO) {
                 snprintf(pageMsg, sizeof(pageMsg), radioOn ? "Turning Wi-Fi off" : "Turning Wi-Fi on");
-                job = Job::Radio;
+                queue(Job::Radio);
             } else if (activate == WIFI_SETTINGS) {
                 u64 tid = settingsTitle();
                 if (tid) { aptSetChainloader(tid, MEDIATYPE_NAND); quit = true; }
                 else snprintf(pageMsg, sizeof(pageMsg), "System Settings not found for this region");
             }
         }
-        if (req == SITE_CLOCK) { snprintf(clockMsg, sizeof(clockMsg), "Asking pool.ntp.org"); job = Job::Clock; }
+        if (req == SITE_CLOCK) { snprintf(clockMsg, sizeof(clockMsg), "Asking pool.ntp.org"); queue(Job::Clock); }
         if (connThread) {
             if (connBusy) {
                 snprintf(pageMsg, sizeof(pageMsg), "Connecting to connection %d, %llu s", connSlot + 1, (osGetTime() - connStart) / 1000);
@@ -654,10 +860,29 @@ int main(int argc, char* argv[]) {
         }
         if (req == SITE_LAUNCH) {
             // On exit libctru jumps to the chainload title, with the plugin armed for it.
+            // Relay's own title only relaunches: the plugin never loads into it, so an arm would stay
+            // pending and land in whatever title starts next.
+            u64 self = 0;
+            APT_GetProgramID(&self);
             syncSaves(syncMsg, sizeof(syncMsg));
-            s.fault = armBroadcast();
-            ftp_log("arm: %s", s.fault ? s.fault : "ok");
-            if (!s.fault) { led_broadcast(LED_BROADCAST_WAIT); aptSetChainloader(title, media); quit = true; }
+            s.fault = title == self ? nullptr : armBroadcast();
+            if (title != self) ftp_log("arm: %s", s.fault ? s.fault : "ok");
+            if (!s.fault) { if (title != self) led_broadcast(LED_BROADCAST_WAIT); aptSetChainloader(title, media); quit = true; }
+        } else if (req == SITE_FETCH) {
+            char m[96];
+            bool ok = netUp && installCia(site_text(0), m, sizeof(m));
+            if (!netUp) snprintf(m, sizeof(m), "HTTP service unavailable");
+            ftp_log("fetch %s: %s", site_text(0), ok ? "installed" : m);
+        } else if (req == SITE_WIFI) {
+            char m[96];
+            if (connThread) ftp_log("wifi: a connect is running, try again");
+            else if (wifiSaveSlot((int)title, site_text(0), site_text(1), m, sizeof(m))) { wifiReadSlots(s.wifi); startConnect((int)title); }
+            else ftp_log("wifi: %s", m);
+        } else if (req == SITE_UNINSTALL) {
+            char m[96];
+            uninstallTitle(title, m, sizeof(m));
+            ftp_log("%s", m);
+            if (page == Page::Titles) { apps = appTitles(); selected = 0; confirmRow = -1; }
         } else if (req == SITE_REBOOT || req == SITE_POWEROFF) {
             svcSleepThread(300000000LL);  // the 200 reply leaves before the network goes
             site_power(req);
@@ -671,14 +896,15 @@ int main(int argc, char* argv[]) {
             if (frame % 300 == 0) pollPower(s);
             s.rate = s.ftp.xfer && s.ftp.xfer_done > lastDone ? s.ftp.xfer_done - lastDone : 0;
             lastDone = s.ftp.xfer ? s.ftp.xfer_done : 0;
-            if (s.ip && !checked && job == Job::None) {
+            if (s.ip && !checked && jobs.empty()) {
                 checked = true;
-                if (clockWrong()) { checkAfterClock = true; snprintf(clockMsg, sizeof(clockMsg), "Clock wrong, asking pool.ntp.org"); job = Job::Clock; }
-                else job = Job::Check;
+                if (clockWrong()) { checkAfterClock = true; snprintf(clockMsg, sizeof(clockMsg), "Clock wrong, asking pool.ntp.org"); queue(Job::Clock); }
+                else queue(Job::Check);
             }
         }
         if (s.state != State::Armed) ftp_status(&s.ftp);
 
+        buildRows();
         // Window over the list: the pinned rows, then the part holding the selection.
         int win = VIS - pinned;
         if (selected >= pinned) {
@@ -698,12 +924,17 @@ int main(int argc, char* argv[]) {
         if (page == Page::Backups && titleSel > 0 && titleSel <= (int)titles.size()) curTitle = &titles[titleSel - 1];
         const SaveBackup* curBackup = page == Page::Backups && selected < (int)backups.size() ? &backups[selected] : nullptr;
         if (page == Page::Saves) snprintf(titleDesc, sizeof(titleDesc), "A for its backups");
-        if (curBackup) snprintf(titleDesc, sizeof(titleDesc), "%s",
-                                curBackup->checkpoint ? "From Checkpoint. A restores it" : "A restores it, the console's copy is kept");
+        if (curBackup) snprintf(titleDesc, sizeof(titleDesc), "A restores it, the console's copy is kept");
+        if (page == Page::Titles && selected < (int)apps.size()) {
+            const AppTitle& t = apps[selected];
+            snprintf(titleDesc, sizeof(titleDesc), "%llu MB, %s", (t.size + (1 << 19)) >> 20,
+                     t.media != MEDIATYPE_SD ? "game card" : t.kept ? "kept, never uninstalled" : "A twice uninstalls, its save stays in relay");
+        }
 
         // Selection light crossfades in place, about 150 ms.
-        for (int v = 0; v < VIS; v++) {
-            float target = (v < nvis && vis[v] == selected && s.state != State::Armed) ? 1.0f : 0.0f;
+        for (int v = 0; v < SLOTS; v++) {
+            bool lit = page == Page::Main || page == Page::Settings ? v == selected : v < nvis && vis[v] == selected;
+            float target = lit && s.state != State::Armed ? 1.0f : 0.0f;
             light[v] += (target - light[v]) * 0.3f;
         }
 
@@ -720,8 +951,13 @@ int main(int argc, char* argv[]) {
         C2D_SceneBegin(bottom);
         field(T->bottom, BOT_W);
         // U+E000 A, U+E001 B in the system font.
-        drawBottom(rows, rowCount, pinned, vis, nvis, selected, light, s.state == State::Armed,
-                   page != Page::Main ? "\uE000 Select      \uE001 Back      START Exit" : "\uE000 Select      START Exit");
+        if (page == Page::Main || page == Page::Settings)
+            drawTiles(rows, rowCount, page == Page::Main ? 1 : 0, "Settings", selected, light, s.state == State::Armed,
+                      page == Page::Main ? "\uE000 Select      START Exit" : "\uE000 Select      \uE001 Back      START Exit",
+                      s.wifi.ap ? s.wifi.strength : 0);
+        else
+            drawBottom(rows, rowCount, pinned, vis, nvis, selected, light, s.state == State::Armed,
+                       "\uE000 Select      \uE001 Back      START Exit");
         C3D_FrameEnd(0);
 
         frame++;
@@ -731,11 +967,12 @@ int main(int argc, char* argv[]) {
 
     if (site_light_is_off()) site_set_light(false);
     if (connThread) { threadJoin(connThread, U64_MAX); threadFree(connThread); }
-    ftp_stop();
+    bool ftpClear = ftp_stop();
     wifiExit();
     if (netUp) netExit();
-    if (socUp) socExit();
-    free(socBuffer);
+    // A session still alive keeps soc and its buffer; process exit reclaims both.
+    if (socUp && ftpClear) socExit();
+    if (ftpClear) free(socBuffer);
 
     C2D_TextBufDelete(measureBuf);
     C2D_TextBufDelete(textBuf);

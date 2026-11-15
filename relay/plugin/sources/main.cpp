@@ -382,8 +382,7 @@ void Main() {
         threadJoin(serverThread, U64_MAX);
         threadFree(serverThread);
     }
-    ftp_stop();
-    if (SOC_buffer) {
+    if (ftp_stop() && SOC_buffer) {
         socExit();
         free(SOC_buffer);
     }

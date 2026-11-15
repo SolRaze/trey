@@ -23,16 +23,12 @@
 // moved to saves/. A Saves page restore goes through in/ the same way.
 // Pack form: per file u16 path length, path, u32 size, data, all little-endian, sorted by path; u16 0 ends.
 // Hash: 64-bit FNV-1a of the whole pack.
-// Checkpoint: its backups in /3ds/Checkpoint/{saves,extdata}/<0xUNIQUEID name>/<folder>/ (raw files) are
-// listed for restore; with sdmc:/3ds/relay/checkpoint present every relay backup is written there too.
 
 static const char* STATE_DIR = "sdmc:/3ds/relay/sync";
 static const char* STORE_DIR = "sdmc:/3ds/relay/saves";
-static const char* CP_FLAG = "sdmc:/3ds/relay/checkpoint";
 enum Kind { SAVE, EXT, KINDS };
 static const char* SUF[KINDS] = { "sav", "ext" };
 static const char* KIND_NAME[KINDS] = { "save", "extdata" };
-static const char* CP_DIR[KINDS] = { "sdmc:/3ds/Checkpoint/saves", "sdmc:/3ds/Checkpoint/extdata" };
 static const int KEEP = 10;
 // Whole archive is held in memory up to three times (files, pack, card copy); Old 3DS apps get ~64 MB.
 static const size_t MAX_BYTES = 8u << 20;
@@ -54,8 +50,8 @@ static FS_Path utf16Path(const std::string& p, std::vector<u16>& buf) {
 }
 
 
-// Extdata id is the unique id for nearly every title. TODO(later): a few share or move theirs (Checkpoint
-// keeps an override list); those sync nothing until an override table is added here.
+// Extdata id is the unique id for nearly every title. TODO(later): a few share or move theirs;
+// those sync nothing until an override table is added here.
 static u32 extId(u64 tid) { return (u32)tid >> 8; }
 
 static bool openArchive(u64 tid, FS_MediaType media, Kind k, FS_Archive* arch) {
@@ -130,7 +126,7 @@ static bool unpack(const u8* b, u32 len, std::vector<SaveFile>& out) {
         if (i + n > len) return false;
         std::string path((const char*)b + i, n);
         i += n;
-        if (!get(4, &size) || i + size > len || path[0] == '/' || path.find("..") != std::string::npos) return false;
+        if (!get(4, &size) || size > len - i || path[0] == '/' || path.find("..") != std::string::npos) return false;
         out.push_back({ path, std::vector<u8>(b + i, b + i + size) });
         i += size;
     }
@@ -220,8 +216,9 @@ static bool readFile(const char* path, std::vector<u8>& out) {
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
     fseek(f, 0, SEEK_SET);
-    out.resize(n < 0 ? 0 : n);
-    bool ok = n >= 0 && fread(out.data(), 1, out.size(), f) == out.size();
+    if (n < 0 || (size_t)n > 2 * MAX_BYTES) { fclose(f); return false; }   // no pack is larger
+    out.resize(n);
+    bool ok = fread(out.data(), 1, out.size(), f) == out.size();
     fclose(f);
     return ok;
 }
@@ -233,7 +230,7 @@ static bool writeFile(const char* path, const std::vector<u8>& b) {
     if (!f) return false;
     bool ok = fwrite(b.data(), 1, b.size(), f) == b.size();
     ok = fclose(f) == 0 && ok;
-    remove(path);
+    if (ok) remove(path);   // rename does not replace; the old copy stays when the new one failed
     if (!ok || rename(tmp.c_str(), path)) { remove(tmp.c_str()); return false; }
     return true;
 }
@@ -246,7 +243,6 @@ static void mkdirs(const std::string& path) {
 
 static bool exists(const std::string& p) { struct stat st; return stat(p.c_str(), &st) == 0; }
 
-// Same form as Checkpoint's default backup folder name.
 static void stamp(char* out, size_t cap, time_t t) {
     struct tm tm;
     gmtime_r(&t, &tm);   // the 3DS clock is local time with no zone
@@ -273,7 +269,7 @@ static std::vector<std::string> listDir(const std::string& dir, bool dirs) {
 }
 
 // SMDH short name in English, Japanese when that is empty; the title id when the icon is unreadable.
-static void titleName(u64 tid, u8 media, char* out, size_t cap) {
+void titleName(u64 tid, u8 media, char* out, size_t cap) {
     snprintf(out, cap, "%016llX", tid);
     static const u32 file[5] = { 0, 0, 2, 0x6E6F6369, 0 };   // exefs "icon"
     u32 arch[4] = { (u32)tid, (u32)(tid >> 32), media, 0 };
@@ -295,42 +291,6 @@ static void titleName(u64 tid, u8 media, char* out, size_t cap) {
         snprintf(out, cap, "%s", u);
         return;
     }
-}
-
-// Checkpoint's title folder: "0x<unique id> <name>". Found by its number, so a renamed title still matches.
-static std::string cpTitleDir(u64 tid, u8 media, Kind k, bool create) {
-    for (auto& n : listDir(CP_DIR[k], true))
-        if (!strncasecmp(n.c_str(), "0x", 2) && strtoul(n.c_str() + 2, nullptr, 16) == extId(tid))
-            return std::string(CP_DIR[k]) + "/" + n;
-    if (!create) return "";
-    char name[64], dir[96];
-    titleName(tid, media, name, sizeof(name));
-    for (char* c = name; *c; c++) if (strchr(".,!\\/:?*\"<>|", *c)) *c = ' ';
-    snprintf(dir, sizeof(dir), "0x%05lX %s", (unsigned long)extId(tid), name);
-    return std::string(CP_DIR[k]) + "/" + dir;
-}
-
-static bool writeRawTree(const std::string& dir, const std::vector<SaveFile>& files) {
-    for (auto& f : files) {
-        std::string p = dir + "/" + f.path;
-        mkdirs(p.substr(0, p.rfind('/')));
-        FILE* o = fopen(p.c_str(), "wb");
-        if (!o) return false;
-        bool ok = fwrite(f.data.data(), 1, f.data.size(), o) == f.data.size();
-        if (fclose(o) || !ok) return false;
-    }
-    return true;
-}
-
-static bool readRawTree(const std::string& root, const std::string& rel, std::vector<SaveFile>& out, size_t& total) {
-    std::string dir = rel.empty() ? root : root + "/" + rel;
-    for (auto& n : listDir(dir, true)) if (!readRawTree(root, rel.empty() ? n : rel + "/" + n, out, total)) return false;
-    for (auto& n : listDir(dir, false)) {
-        SaveFile f{ rel.empty() ? n : rel + "/" + n, {} };
-        if (!readFile((root + "/" + f.path).c_str(), f.data) || (total += f.data.size()) > MAX_BYTES) return false;
-        out.push_back(std::move(f));
-    }
-    return true;
 }
 
 // Keeps b as the newest backup of tid's k, drops the oldest past KEEP.
@@ -357,15 +317,10 @@ static bool backup(u64 tid, FS_MediaType media, Kind k, const std::vector<u8>& b
     if (time(NULL) < 1577836800) ftp_log("clock before 2020, set it in System Settings; backups kept unpruned");
     else for (int i = 0; i + KEEP < (int)mine.size(); i++) remove((std::string(dir) + "/" + mine[i]).c_str());
 
-    if (exists(CP_FLAG)) {
-        std::vector<SaveFile> files;
-        std::string cp = cpTitleDir(tid, media, k, true) + "/" + st;
-        if (!unpack(b.data(), b.size(), files) || !writeRawTree(cp, files)) ftp_log("save %016llX: Checkpoint copy failed", tid);
-    }
     return true;
 }
 
-enum class Outcome { Same, Pushed, Pulled, NoSave, Failed };
+enum class Outcome { Same, Pushed, Pulled, NoSave, TooBig, Failed };
 
 static Outcome syncOne(u64 tid, FS_MediaType media, Kind k) {
     FS_Archive arch;
@@ -374,7 +329,7 @@ static Outcome syncOne(u64 tid, FS_MediaType media, Kind k) {
     size_t total = 0;
     bool read = readTree(arch, "", files, total);
     FSUSER_CloseArchive(arch);
-    if (total > MAX_BYTES) { ftp_log("%s %016llX over %u MB, skipped", KIND_NAME[k], tid, MAX_BYTES >> 20); return Outcome::NoSave; }
+    if (total > MAX_BYTES) { ftp_log("%s %016llX over %u MB, skipped", KIND_NAME[k], tid, MAX_BYTES >> 20); return Outcome::TooBig; }
     if (!read) { ftp_log("%s %016llX unreadable", KIND_NAME[k], tid); return Outcome::Failed; }
     if (files.empty()) return Outcome::NoSave;
     std::vector<u8> local = pack(files);
@@ -386,17 +341,24 @@ static Outcome syncOne(u64 tid, FS_MediaType media, Kind k) {
     std::vector<u8> in;
     if (readFile(forced.c_str(), in)) {
         u64 ph = fnv(in);
-        if (ph != lh) {
-            std::vector<SaveFile> unpacked;
-            if (!unpack(in.data(), in.size(), unpacked)) { ftp_log("%s %016llX: in/ copy unreadable", kn, tid); return Outcome::Failed; }
-            if (!backup(tid, media, k, local)) { ftp_log("%s %016llX: backup failed", kn, tid); return Outcome::Failed; }
-            if (!writeArchive(tid, media, k, unpacked)) { ftp_log("%s %016llX: restore failed", kn, tid); return Outcome::Failed; }
+        std::vector<SaveFile> unpacked;
+        if (ph != lh && !unpack(in.data(), in.size(), unpacked)) {
+            // Set aside, so the title's ordinary sync below still runs.
+            remove((forced + ".bad").c_str());
+            rename(forced.c_str(), (forced + ".bad").c_str());
+            std::vector<u8>().swap(in);
+            ftp_log("%s %016llX: in/ copy unreadable, now .bad", kn, tid);
+        } else {
+            if (ph != lh) {
+                if (!backup(tid, media, k, local)) { ftp_log("%s %016llX: backup failed", kn, tid); return Outcome::Failed; }
+                if (!writeArchive(tid, media, k, unpacked)) { ftp_log("%s %016llX: restore failed", kn, tid); return Outcome::Failed; }
+            }
+            if (!writeFile(store.c_str(), in)) { ftp_log("%s %016llX: write failed", kn, tid); return Outcome::Failed; }
+            remove(forced.c_str());
+            setLast(tid, k, ph);
+            ftp_log("%s %016llX restored from in/", kn, tid);
+            return ph == lh ? Outcome::Same : Outcome::Pulled;
         }
-        if (!writeFile(store.c_str(), in)) { ftp_log("%s %016llX: write failed", kn, tid); return Outcome::Failed; }
-        remove(forced.c_str());
-        setLast(tid, k, ph);
-        ftp_log("%s %016llX restored from in/", kn, tid);
-        return ph == lh ? Outcome::Same : Outcome::Pulled;
     }
     std::vector<u8> remote;
     bool have = readFile(store.c_str(), remote);
@@ -404,6 +366,12 @@ static Outcome syncOne(u64 tid, FS_MediaType media, Kind k) {
 
     if (have && rh == lh) { if (last != lh) setLast(tid, k, lh); return Outcome::Same; }
     bool pull = have && lh == last && rh != last;   // only the card copy moved
+    std::vector<SaveFile> unpacked;
+    if (pull && !unpack(remote.data(), remote.size(), unpacked)) {
+        // The console's copy replaces it below; a store copy that moved is backed up first.
+        ftp_log("%s %016llX: store copy unreadable, kept as a backup", kn, tid);
+        pull = false;
+    }
     if (!pull) {
         if (have && rh != last && !backup(tid, media, k, remote)) { ftp_log("%s %016llX: backup failed", kn, tid); return Outcome::Failed; }
         if (!writeFile(store.c_str(), local)) { ftp_log("%s %016llX: write failed", kn, tid); return Outcome::Failed; }
@@ -411,9 +379,8 @@ static Outcome syncOne(u64 tid, FS_MediaType media, Kind k) {
         ftp_log("%s %016llX sent", kn, tid);
         return Outcome::Pushed;
     }
-    std::vector<SaveFile> unpacked;
     if (!backup(tid, media, k, local)) { ftp_log("%s %016llX: backup failed", kn, tid); return Outcome::Failed; }
-    if (!unpack(remote.data(), remote.size(), unpacked) || !writeArchive(tid, media, k, unpacked)) {
+    if (!writeArchive(tid, media, k, unpacked)) {
         ftp_log("%s %016llX: restore failed", kn, tid);
         return Outcome::Failed;
     }
@@ -448,7 +415,7 @@ bool syncSaves(char* msg, size_t cap) {
                 case Outcome::Pulled: pulled++; break;
                 case Outcome::Same:   same++; break;
                 case Outcome::Failed: failed++; break;
-                case Outcome::NoSave: break;
+                case Outcome::NoSave: case Outcome::TooBig: break;
             }
         }
     }
@@ -459,13 +426,21 @@ bool syncSaves(char* msg, size_t cap) {
     return !failed;
 }
 
+bool saveStored(u64 tid, u8 media) {
+    Outcome o = syncOne(tid, (FS_MediaType)media, SAVE);
+    return o != Outcome::Failed && o != Outcome::TooBig;
+}
+
+void forgetSync(u64 tid) {
+    for (int k = 0; k < KINDS; k++) remove(statePath(tid, (Kind)k).c_str());
+}
+
 std::vector<SaveTitle> saveTitles() {
     std::vector<SaveTitle> out;
     if (R_FAILED(amInit())) return out;
     for (auto& [tid, m] : apps()) {
         bool sav = exists(storePath(tid, SAVE)), ext = exists(storePath(tid, EXT));
-        bool cp = !cpTitleDir(tid, m, SAVE, false).empty() || !cpTitleDir(tid, m, EXT, false).empty();
-        if (!sav && !ext && !cp) continue;
+        if (!sav && !ext) continue;
         SaveTitle t{ tid, (u8)m, "", 0, ext };
         titleName(tid, m, t.name, sizeof(t.name));
         u64 mt = 0;
@@ -487,7 +462,8 @@ std::vector<SaveBackup> saveBackups(const SaveTitle& t) {
         if (k < 0) continue;
         SaveBackup b{};
         struct tm tm{};
-        if (sscanf(n.c_str(), "%4d%2d%2d-%2d%2d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &tm.tm_hour, &tm.tm_min) == 5) {
+        if (sscanf(n.c_str(), "%4d%2d%2d-%2d%2d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &tm.tm_hour, &tm.tm_min) == 5
+            && tm.tm_mon >= 1 && tm.tm_mon <= 12) {   // strftime indexes month names unchecked
             tm.tm_year -= 1900;
             tm.tm_mon -= 1;
             char when[24];
@@ -500,18 +476,6 @@ std::vector<SaveBackup> saveBackups(const SaveTitle& t) {
         b.ext = k == EXT;
         all.push_back({ n, b });
     }
-    for (int k = 0; k < KINDS; k++) {
-        std::string cp = cpTitleDir(t.tid, t.media, (Kind)k, false);
-        if (cp.empty()) continue;
-        for (auto& n : listDir(cp, true)) {
-            SaveBackup b{};
-            snprintf(b.label, sizeof(b.label), "%.24s  Checkpoint %s", n.c_str(), KIND_NAME[k]);
-            snprintf(b.path, sizeof(b.path), "%s/%s", cp.c_str(), n.c_str());
-            b.ext = k == EXT;
-            b.checkpoint = true;
-            all.push_back({ n, b });
-        }
-    }
     std::sort(all.begin(), all.end(), [](auto& a, auto& b) { return a.first > b.first; });
     std::vector<SaveBackup> out;
     for (auto& a : all) out.push_back(a.second);
@@ -521,21 +485,20 @@ std::vector<SaveBackup> saveBackups(const SaveTitle& t) {
 bool restoreBackup(const SaveTitle& t, const SaveBackup& b, char* msg, size_t cap) {
     Kind k = b.ext ? EXT : SAVE;
     std::vector<u8> pk;
-    if (b.checkpoint) {
-        std::vector<SaveFile> files;
-        size_t total = 0;
-        if (!readRawTree(b.path, "", files, total) || files.empty()) { snprintf(msg, cap, "Checkpoint folder unreadable"); return false; }
-        pk = pack(files);
-    } else if (!readFile(b.path, pk)) {
+    // Checked here: syncOne sets an unreadable in/ copy aside and answers for the ordinary sync instead.
+    if (std::vector<SaveFile> probe; !readFile(b.path, pk) || !unpack(pk.data(), pk.size(), probe)) {
         snprintf(msg, cap, "Backup unreadable");
         return false;
     }
     mkdirs(std::string(STORE_DIR) + "/in");
     if (!writeFile(storePath(t.tid, k, "in/").c_str(), pk)) { snprintf(msg, cap, "Card write failed"); return false; }
-    switch (syncOne(t.tid, (FS_MediaType)t.media, k)) {
+    Outcome o = syncOne(t.tid, (FS_MediaType)t.media, k);
+    // Left in in/, a copy that did not go in would fail every later sync of the title.
+    if (o != Outcome::Pulled && o != Outcome::Same) remove(storePath(t.tid, k, "in/").c_str());
+    switch (o) {
         case Outcome::Pulled: snprintf(msg, cap, "Restored, the replaced %s is the newest backup", KIND_NAME[k]); return true;
         case Outcome::Same:   snprintf(msg, cap, "Already the console's %s", KIND_NAME[k]); return true;
-        case Outcome::NoSave: remove(storePath(t.tid, k, "in/").c_str()); snprintf(msg, cap, "No %s on the console yet, start the game once", KIND_NAME[k]); return false;
+        case Outcome::NoSave: snprintf(msg, cap, "No %s on the console yet, start the game once", KIND_NAME[k]); return false;
         default:              snprintf(msg, cap, "Restore failed, see log"); return false;
     }
 }

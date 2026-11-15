@@ -36,7 +36,7 @@ typedef struct {
     int ctrl, pasv, data;
     u64 rest;
     char cwd[PATH_MAX];
-    char rnfr[PATH_MAX];
+    char rnfr[PATH_MAX + 8];   /* card path: SD_PREFIX + absolute */
     char line[LINE_MAX_];
     int line_len;
     char *buf;
@@ -646,11 +646,13 @@ int ftp_start(int prio, const char *banner) {
     return listener ? 0 : -1;
 }
 
-void ftp_stop(void) {
-    if (!listener) return;
+bool ftp_stop(void) {
+    if (!listener) return true;
     running = false;
     threadJoin(listener, U64_MAX);
     threadFree(listener);
     listener = NULL;
-    for (int i = 0; i < 200 && sessions > 0; i++) svcSleepThread(10000000LL);  /* sessions are detached */
+    /* Sessions are detached. One inside a SITE handler (SHOT writes two BMPs) sees running only after it. */
+    for (int i = 0; i < 1000 && sessions > 0; i++) svcSleepThread(10000000LL);
+    return sessions == 0;
 }

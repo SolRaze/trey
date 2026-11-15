@@ -8,21 +8,22 @@ contents
 - flac-scan.py/ FLAC on the card above 16-bit 48 kHz, the Old 3DS limit
 
 relay
-rows | Broadcast a game | Saves, Install from inbox | Wi-Fi, Update, Theme | START exits | B back
+main page | Broadcast a game row | icon tiles Saves, Titles | Inbox, Settings | d-pad or touch | START exits | B back
+settings page | icon tiles Wi-Fi, Update | Theme, Clock
 - broadcast/ arms the Artic Base plugin | connect from Azahar, pick the game on HOME
 - sync/ every installed app's save and extdata both ways with `sdmc:/3ds/relay/saves/<TID>.sav` `.ext` | last synced hash per title in `sdmc:/3ds/relay/sync` | one side changed = it wins | both changed = console wins | runs at launch, before Broadcast, Sync now | computer side `trey saves pull|push`
 - backups/ replaced copy kept as `saves/old/<TID>/<YYYYMMDD-HHMMSS>.sav` `.ext` | newest 10 per kind | stamp from the console clock
 - saves page/ Sync now | titles by name, copy time | A opens backups | A twice restores one | console's copy kept as a backup first | `saves/in/<TID>.sav` `.ext` always wins, same path
-- checkpoint/ its backups in `/3ds/Checkpoint/saves|extdata/<0xID name>/<folder>/` listed and restorable | `sdmc:/3ds/relay/checkpoint` present = every relay backup also written there
-- limits/ archive over 8 MB skipped, logged | extdata id = unique id, titles with a moved id sync no extdata
+- limits/ archive over 8 MB skipped, logged | extdata id = unique id, titles with a moved id sync no extdata | unreadable `saves/in` copy renamed `.bad` | unreadable store copy kept as a backup, console's copy sent
+- titles/ SD and card apps by name and size | A twice uninstalls an SD one with its update and DLC | save synced to relay's store first, refused when that fails | relay, FBI and 3hs never uninstall
 - inbox/ installs every CIA in `sdmc:/3ds/relay/inbox`, moves each to `done` | drop files there over FTP or on the card
-- wifi/ network, bars, IP on top | saved connections 1 to 3, A connects to one, seconds counted | Wi-Fi off and on | Internet settings opens System Settings | Set clock
-- clock/ SNTP from `pool.ntp.org` + Luma `ntp_tz_offset_min` | RTC set, user offset zeroed, as Rosalina does | at launch when the clock reads before 2024, before the update check | TLS fails on a wrong clock
+- wifi/ network, bars, IP on top | saved connections 1 to 3 by name, A connects, seconds counted | A on an empty one or Y on any: keyboard for name and password, saved WPA2 AES or open, then connects | Wi-Fi off and on | Internet settings opens System Settings for proxy and IP
+- clock/ Clock tile | SNTP from `pool.ntp.org`, each resolved address in turn + Luma `ntp_tz_offset_min` | RTC set, user offset zeroed, as Rosalina does | at launch when the clock reads before 2024, before the update check | TLS fails on a wrong clock
 - update/ latest release of this repo, `build` + `relay.cia` | checked at launch | installs only a newer stamp
 - https/ libcurl + mbedTLS, roots embedded at build | the console's own TLS fails GitHub's handshake
 - build/ devkitPro 3ds-dev + 3ds-curl | `3gxtool` `bannertool` `makerom` on PATH | `make -C relay` | `make -C relay release` uploads
 - build id/ `<commit>[+]@<yymmddhhmm>` | `+` dirty tree | stamp orders updates
-- SITE/ `trey site help` | SYNC INBOX UPDATE CLOCK run Sync now, Install, Update, Set clock remotely
+- SITE/ `trey site help` | SYNC INBOX UPDATE CLOCK run Sync now, Inbox, Update, Clock remotely | FETCH <url> downloads and installs a CIA | UNINSTALL <id> | one request waits at a time, a second answers 450 busy | WIFI <1-3> <name> [password] %XX-escaped, `trey wifi` asks the password
 - screens/ off after 20 s idle with an FTP client | `SITE LIGHT` shares the state | any button lights them, that press does nothing else
 - themes/ `mono` | `memcard` | choice in `sdmc:/3ds/relay/theme`
 

@@ -13,6 +13,7 @@
 #include "build.h"
 #include "ftp.h"
 #include "site.h"
+#include "core.h"
 
 #define SHOT_DIR "sdmc:/3ds/relay"
 
@@ -136,7 +137,8 @@ static int site_stat(char *out, size_t cap) {
     u64 tid = 0;
     if (R_SUCCEEDED(APT_GetProgramID(&tid)))
         n += snprintf(out + n, cap - n, "\ntitle %016llX", tid);
-    snprintf(out + n, cap - n, "\nlight %s", light_off ? "off" : "on");
+    n += snprintf(out + n, cap - n, "\nlight %s", light_off ? "off" : "on");
+    if (is_app) snprintf(out + n, cap - n, "\ncore %s", core_running() ? "running" : "absent");
     return 200;
 }
 

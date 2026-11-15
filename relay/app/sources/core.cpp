@@ -36,27 +36,13 @@ static bool install() {
     return ok;
 }
 
-// Process names come from Luma's svcGetProcessInfo extension (type 0x10000).
-static bool running() {
-    u32 pids[64];
-    s32 n = 0;
-    if (R_FAILED(svcGetProcessList(&n, pids, 64))) return false;
-    for (s32 i = 0; i < n; i++) {
-        Handle h;
-        if (R_FAILED(svcOpenProcess(&h, pids[i]))) continue;
-        char name[9] = {};
-        svcGetProcessInfo((s64*)name, h, 0x10000);
-        svcCloseHandle(h);
-        if (!strncmp(name, CORE_NAME, 8)) return true;
-    }
-    return false;
-}
-
 void coreStart() {
     hidScanInput();
     if ((hidKeysHeld() & (KEY_L | KEY_R)) == (KEY_L | KEY_R)) { ftp_log("core skipped: L+R held"); return; }
     if (!install()) { ftp_log("core: cannot write " CORE_CXI); return; }
-    if (running()) { ftp_log("core running"); return; }
+    // A running core is never stopped: PMAPP_TerminateTitle then a relaunch faults the kernel
+    // in loader (Luma 13.5). A new build on the card takes over next boot.
+    if (core_running()) { ftp_log("core running"); return; }
 
     u32 boot = core_boot_id(), last = 0, launches = 0;
     if (FILE* f = fopen(CORE_LAUNCHES, "r")) {

@@ -20,6 +20,7 @@
 #include "wifi.hpp"
 #include "ftp.h"
 #include "site.h"
+#include "tunnel.h"
 #include "led.h"
 
 #define SOC_ALIGN      0x1000
@@ -187,6 +188,8 @@ struct Screen {
     bool charging = false;
     double sdFreeGB = -1;
     unsigned long long rate = 0; // current transfer, bytes per second
+    int tunnel = TUNNEL_OFF;
+    char tunnelLine[48] = "";
 };
 
 // Battery and card space for the header, every few seconds.
@@ -244,6 +247,8 @@ static void drawTop(const Screen& s) {
         text(MARGIN, 100, 1.1f, T->dim, "-");
     }
 
+    if (s.tunnel != TUNNEL_OFF)
+        text(TOP_W - MARGIN, 152, 0.5f, s.tunnel == TUNNEL_UP ? T->white : T->grey, s.tunnelLine, C2D_AlignRight);
     if (s.fault) {
         text(MARGIN, 152, 0.55f, T->fault, s.fault);
         return;
@@ -564,6 +569,7 @@ int main(int argc, char* argv[]) {
         svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
         site_init(true);
         socOk = ftp_start(prio + 1, "trey relay") == 0;
+        if (socOk) tunnel_start(prio + 1);
     }
     s.state = socOk ? State::Starting : State::NoSockets;
     bool netUp = netInit();
@@ -903,6 +909,7 @@ int main(int argc, char* argv[]) {
             }
         }
         if (s.state != State::Armed) ftp_status(&s.ftp);
+        s.tunnel = tunnel_status(s.tunnelLine, sizeof(s.tunnelLine));
 
         buildRows();
         // Window over the list: the pinned rows, then the part holding the selection.
@@ -967,6 +974,8 @@ int main(int argc, char* argv[]) {
 
     if (site_light_is_off()) site_set_light(false);
     if (connThread) { threadJoin(connThread, U64_MAX); threadFree(connThread); }
+    // Before ftp_stop: the tunnel's local connections are FTP sessions, and no thread may touch a socket after socExit.
+    tunnel_stop();
     bool ftpClear = ftp_stop();
     wifiExit();
     if (netUp) netExit();

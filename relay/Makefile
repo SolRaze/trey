@@ -18,6 +18,8 @@ all:
 	sed -e 's/VERSION_MAJOR/$(VERSION_MAJOR)/' -e 's/VERSION_MINOR/$(VERSION_MINOR)/' -e 's/VERSION_REVISION/$(VERSION_REVISION)/' plugin/relay.plgInfo > plugin/build/relay.plgInfo
 	$(MAKE) -C plugin $(VERSIONS)
 	cp plugin/relay.3gx app/data/plugin.bin
+	$(MAKE) -C core
+	cp core/core.cxi app/data/core.bin
 	$(MAKE) -C app cia $(VERSIONS)
 
 # Uploads this build as the latest GitHub release of SolRaze/trey, where the app's updater looks
@@ -30,6 +32,7 @@ release: all
 
 clean:
 	$(MAKE) -C plugin clean
+	$(MAKE) -C core clean
 	$(MAKE) -C app clean
 	rm -rf app/data
 

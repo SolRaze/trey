@@ -11,6 +11,10 @@ relay
 main page | Broadcast a game row | icon tiles Saves, Titles | Inbox, Settings | d-pad or touch | START exits | B back
 settings page | icon tiles Wi-Fi, Update | Theme, Clock
 - broadcast/ arms the Artic Base plugin | connect from Azahar, pick the game on HOME
+- core/ sysmodule `0004013000F0E702`, base memory region | outlives Relay, HOME, games | Relay writes it to `/luma/sysmodules`, starts it at launch
+  needs Luma `enable_external_firm_and_modules = 1` | denies sleep | lid shut: backlights and every LED but Wi-Fi off | lid open restores
+  `/3ds/relay/core.status` every 6 s: memory per region, SD, NAND, battery, docked, lid | events in `core.log`
+  L+R held skips it | at most two starts per boot | `0xF0E7` unique id, low byte 02 or PM panics
 - sync/ every installed app's save and extdata both ways with `sdmc:/3ds/relay/saves/<TID>.sav` `.ext` | last synced hash per title in `sdmc:/3ds/relay/sync` | one side changed = it wins | both changed = console wins | runs at launch, before Broadcast, Sync now | computer side `trey saves pull|push`
 - backups/ replaced copy kept as `saves/old/<TID>/<YYYYMMDD-HHMMSS>.sav` `.ext` | newest 10 per kind | stamp from the console clock
 - saves page/ Sync now | titles by name, copy time | A opens backups | A twice restores one | console's copy kept as a backup first | `saves/in/<TID>.sav` `.ext` always wins, same path

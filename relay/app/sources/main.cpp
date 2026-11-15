@@ -15,6 +15,7 @@
 
 #include "arm.hpp"
 #include "clock.hpp"
+#include "core.hpp"
 #include "inbox.hpp"
 #include "net.hpp"
 #include "saves.hpp"
@@ -608,6 +609,7 @@ int main(int argc, char* argv[]) {
         socOk = ftp_start(prio + 1, "trey relay") == 0;
         if (socOk) tunnel_start(prio + 1);
     }
+    coreStart();   // after ftp_start: its outcome goes to the FTP log
     s.state = socOk ? State::Starting : State::NoSockets;
     bool netUp = netInit();
     wifiInit();

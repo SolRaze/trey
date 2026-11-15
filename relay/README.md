@@ -5,6 +5,7 @@ trey's console app + Luma plugin | fork of ArticBaseServer v1.2.0 | github.com/a
 parts
 - app/ Relay launcher, citro2d menu | FTP on 5000 | rows broadcast | saves, inbox | wifi, update, theme | saves page: sync, per-title backups, restore
 - plugin/ Luma 3GX in the game process | Artic Base server 5543 + FTP 5000
+- core/ background sysmodule, base region | sleep denied, lid-shut dark, status file | app copies it to `/luma/sysmodules`, starts it
 - common/ FTP server, SITE commands, CIA install sink | `common/test/host.sh` tests it on the Mac
 
 build

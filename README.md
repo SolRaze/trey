@@ -14,7 +14,7 @@ settings page | icon tiles Wi-Fi, Update | Theme, Clock
 - sync/ every installed app's save and extdata both ways with `sdmc:/3ds/relay/saves/<TID>.sav` `.ext` | last synced hash per title in `sdmc:/3ds/relay/sync` | one side changed = it wins | both changed = console wins | runs at launch, before Broadcast, Sync now | computer side `trey saves pull|push`
 - backups/ replaced copy kept as `saves/old/<TID>/<YYYYMMDD-HHMMSS>.sav` `.ext` | newest 10 per kind | stamp from the console clock
 - saves page/ Sync now | titles by name, copy time | A opens backups | A twice restores one | console's copy kept as a backup first | `saves/in/<TID>.sav` `.ext` always wins, same path
-- limits/ archive over 8 MB skipped, logged | extdata id = unique id, titles with a moved id sync no extdata | unreadable `saves/in` copy renamed `.bad` | unreadable store copy kept as a backup, console's copy sent
+- limits/ archive over half the free heap skipped, logged, ~12 MB | extdata id from the title's exheader by AM, unique id when AM has none | unreadable `saves/in` copy renamed `.bad` | unreadable store copy kept as a backup, console's copy sent
 - titles/ SD and card apps by name and size | A twice uninstalls an SD one with its update and DLC | save synced to relay's store first, refused when that fails | relay, FBI and 3hs never uninstall
 - inbox/ installs every CIA in `sdmc:/3ds/relay/inbox`, moves each to `done` | drop files there over FTP or on the card
 - wifi/ network, bars, IP on top | saved connections 1 to 3 by name, A connects, seconds counted | A on an empty one or Y on any: keyboard for name and password, saved WPA2 AES or open, then connects | Wi-Fi off and on | Internet settings opens System Settings for proxy and IP
@@ -24,7 +24,9 @@ settings page | icon tiles Wi-Fi, Update | Theme, Clock
 - build/ devkitPro 3ds-dev + 3ds-curl | `3gxtool` `bannertool` `makerom` on PATH | `make -C relay` | `make -C relay release` uploads
 - build id/ `<commit>[+]@<yymmddhhmm>` | `+` dirty tree | stamp orders updates
 - SITE/ `trey site help` | SYNC INBOX UPDATE CLOCK run Sync now, Inbox, Update, Clock remotely | FETCH <url> downloads and installs a CIA | UNINSTALL <id> | one request waits at a time, a second answers 450 busy | WIFI <1-3> <name> [password] %XX-escaped, `trey wifi` asks the password
-- screens/ off after 20 s idle with an FTP client | `SITE LIGHT` shares the state | any button lights them, that press does nothing else
+- screens/ off after 20 s idle with an FTP client | off while the lid is closed, FTP keeps running | `SITE LIGHT` shares the state | any button lights them, that press does nothing else
+- input/ UDP 4950, Rosalina InputRedirection's packet | buttons and touch on Relay's pages, `trey press` `trey touch` | Rosalina holding the port takes it instead
+- jobs/ sync, inbox, update, clock, restore on a worker thread below FTP | menu and transfers keep running
 - themes/ `mono` | `memcard` | choice in `sdmc:/3ds/relay/theme`
 
 gotchas

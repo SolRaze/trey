@@ -1,6 +1,9 @@
 #include <3ds.h>
 #include <citro2d.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <malloc.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -506,6 +509,41 @@ static void drawTiles(const Row* rows, int count, int first, const char* pageTit
     footer(rows[selected].desc, prompt);
 }
 
+// Jobs run one at a time on a worker thread below FTP and the tunnel, so the menu keeps drawing and
+// a client keeps its transfer. A worker job only writes its own message line; anything that reads or
+// changes menu state happens on the main thread once it ends (finishJob).
+enum class Job { Sync, Inbox, Update, Check, Radio, Restore, Clock };
+struct JobCtx {
+    Job kind;
+    volatile bool busy;
+    bool ok;
+    bool netUp;
+    bool radioOn;                 // Radio: the state before the toggle
+    SaveTitle title;              // Restore: copies, the menu may relist under it
+    SaveBackup backup;
+    UpdateResult update;
+    char *syncMsg, *inboxMsg, *updateMsg, *clockMsg, *pageMsg;
+};
+static JobCtx jc;
+
+static void runJob(void*) {
+    switch (jc.kind) {
+    case Job::Sync:    jc.ok = syncSaves(jc.syncMsg, 96); break;
+    case Job::Restore: jc.ok = restoreBackup(jc.title, jc.backup, jc.pageMsg, 96); break;
+    case Job::Inbox:   jc.ok = installInbox(jc.inboxMsg, 96); break;
+    case Job::Clock:   jc.ok = clockSync(jc.clockMsg, 96); break;
+    case Job::Radio:   jc.ok = wifiRadio(!jc.radioOn, jc.pageMsg, 96); break;
+    case Job::Check:
+    case Job::Update:
+        if (!jc.netUp) { snprintf(jc.updateMsg, 96, "HTTP service unavailable"); jc.update = UpdateResult::Failed; break; }
+        if (jc.kind == Job::Check) { jc.update = checkUpdate(jc.updateMsg, 96); ftp_log("update check: %s", jc.updateMsg); break; }
+        jc.update = runUpdate(jc.updateMsg, 96);
+        if (jc.update != UpdateResult::Installed) ftp_log("update: %s", jc.updateMsg);
+        break;
+    }
+    jc.busy = false;
+}
+
 int main(int argc, char* argv[]) {
     gfxInitDefault();
     C3D_Init(C3D_DEFAULT_CMDBUF_SIZE);
@@ -529,10 +567,9 @@ int main(int argc, char* argv[]) {
     char updateMsg[96] = "Checks GitHub for a newer build";
     char pageMsg[96] = "";
     char themeMsg[48], wifiRow[64], slotRow[3][48], slotDesc[3][48], clockDesc[80];
-    // Jobs block: the row shows its "working" line for one frame, the job runs on the next. Queued in
-    // order, each kind once, so a SITE request and a row pressed in the same frame both run.
-    enum class Job { Sync, Inbox, Update, Check, Radio, Restore, Clock };
+    // Queued in order, each kind once, so a SITE request and a row pressed in the same frame both run.
     std::vector<Job> jobs;
+    Thread jobThread = nullptr;
     auto queue = [&](Job j) { if (std::find(jobs.begin(), jobs.end(), j) == jobs.end()) jobs.push_back(j); };
     char clockMsg[96] = "";
     bool checkAfterClock = false;   // launch: a wrong clock fails TLS, so it is set before the update check
@@ -578,6 +615,7 @@ int main(int argc, char* argv[]) {
     led_broadcast(LED_BROADCAST_OFF);   // a stream that ended without the plugin clearing it
 
     pollPower(s);
+    logHeap();
     // Saves sync once at launch; it reads only the card, so Wi-Fi does not matter.
     snprintf(syncMsg, sizeof(syncMsg), "Syncing saves");
     queue(Job::Sync);
@@ -598,17 +636,102 @@ int main(int argc, char* argv[]) {
     int frame = 0, armedFrames = 0;
     bool quit = false;
 
+    // Input on UDP 4950, the packet Rosalina's InputRedirection takes: u32 pad word, active low, 0xfff
+    // idle, HID bit order; u32 touch, bit 24 = touching, y << 12 | x, both 12-bit; circle pad, c-stick
+    // and HOME/POWER words follow, unused. Drives Relay's own pages; HOME and POWER do nothing here.
+    // While Rosalina's InputRedirection holds the port the bind fails and is retried every 5 s; its
+    // presses arrive through HID then. Non-blocking, read every frame on the main thread.
+    const u16 IR_PORT = 4950;
+    int irSock = -1;
+    u32 irHeld = 0;
+    bool irTouching = false;
+    touchPosition irPos = {};
+    auto irOpen = [&] {
+        int fd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (fd < 0) return;
+        fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+        struct sockaddr_in a = {};
+        a.sin_family = AF_INET;
+        a.sin_port = htons(IR_PORT);
+        a.sin_addr.s_addr = INADDR_ANY;
+        if (bind(fd, (struct sockaddr*)&a, sizeof(a))) { close(fd); return; }
+        irSock = fd;
+        ftp_log("input: UDP %u", IR_PORT);
+    };
+    // Lid closed: both backlights off until it opens. Sleep stays disallowed, so FTP keeps running.
+    bool lidShut = false, lidDark = false;
+    ptmuInit();   // held for the lid poll; pollPower's own init and exit only count
+
+    jc.syncMsg = syncMsg; jc.inboxMsg = inboxMsg; jc.updateMsg = updateMsg; jc.clockMsg = clockMsg; jc.pageMsg = pageMsg;
+    // Menu follow-ups of the job that just ended, on the main thread.
+    auto afterJob = [&] {
+        switch (jc.kind) {
+        case Job::Sync:    if (page == Page::Saves) titles = saveTitles(); break;
+        case Job::Restore:
+            for (auto& t : titles) if (t.tid == jc.title.tid) { backups = saveBackups(t); break; }
+            if (page == Page::Backups) selected = 0;   // the copy it replaced, now the newest
+            break;
+        case Job::Clock:   if (checkAfterClock) { checkAfterClock = false; queue(Job::Check); } break;
+        case Job::Radio:   if (jc.ok) radioOn = !radioOn; break;
+        case Job::Update:
+            if (jc.update == UpdateResult::Installed) { aptSetChainloaderToSelf(); quit = true; }   // relaunch into it
+            break;
+        case Job::Inbox: case Job::Check: break;
+        }
+    };
+    auto finishJob = [&] {
+        threadJoin(jobThread, U64_MAX);
+        threadFree(jobThread);
+        jobThread = nullptr;
+        afterJob();
+    };
+    // Before anything on the main thread that syncs saves, installs or uninstalls.
+    auto waitJob = [&] { if (jobThread) finishJob(); };
+
     while (!quit && aptMainLoop()) {
         hidScanInput();
         u32 down = hidKeysDown();
         down |= hidKeysDownRepeat() & (KEY_DUP | KEY_DDOWN | KEY_CPAD_UP | KEY_CPAD_DOWN | KEY_DLEFT | KEY_DRIGHT |
                                        KEY_CPAD_LEFT | KEY_CPAD_RIGHT);   // held = repeat, lists and tiles
-        bool input = down || hidKeysHeld();
+        u32 irDown = 0;
+        if (irSock < 0 && socOk && frame % 300 == 0) irOpen();
+        if (irSock >= 0) {
+            u8 p[20];
+            // Each packet is a whole state; a press and release in one frame still counts as a press.
+            while (recv(irSock, p, sizeof(p), 0) >= 8) {
+                u32 pad = p[0] | p[1] << 8 | p[2] << 16 | (u32)p[3] << 24;
+                u32 touch = p[4] | p[5] << 8 | p[6] << 16 | (u32)p[7] << 24;
+                u32 held = ~pad & 0xFFF;
+                irDown |= held & ~irHeld;
+                irHeld = held;
+                bool t = touch & BIT(24);
+                if (t && !irTouching) {
+                    irDown |= KEY_TOUCH;
+                    irPos.px = (touch & 0xFFF) * 320 / 4096;
+                    irPos.py = ((touch >> 12) & 0xFFF) * 240 / 4096;
+                }
+                irTouching = t;
+            }
+        }
+        down |= irDown;
+        bool input = down || hidKeysHeld() || irHeld || irTouching;
+        if (frame % 15 == 0) {
+            u8 open = 1;
+            if (R_SUCCEEDED(PTMU_GetShellState(&open)) && lidShut != !open) {
+                lidShut = !open;
+                // Dark by idle at close counts as the lid's: opening it lights the screens either way.
+                if (lidShut) lidDark = site_light_is_off() ? idleDark : site_set_light(true);
+                else if (lidDark) { site_set_light(false); lidDark = false; }
+                idleDark = false;
+            }
+        }
         idleFrames = input ? 0 : idleFrames + 1;
         if (input) idleUsed = false;
         bool lit = !site_light_is_off();
         if (lit) idleDark = false;
-        if (!lit && down) {
+        if (lidShut) {
+            // Presses still act; the screens stay dark until the lid opens.
+        } else if (!lit && down) {
             site_set_light(false);
             idleDark = false;
             down = 0;   // the press that wakes the screens does nothing else
@@ -698,7 +821,8 @@ int main(int argc, char* argv[]) {
             if (down & KEY_A) activate = selected;
             if (down & KEY_TOUCH) {
                 touchPosition t;
-                hidTouchRead(&t);
+                if (irDown & KEY_TOUCH) t = irPos;
+                else hidTouchRead(&t);
                 if (page != Page::Main && t.py >= 205 && t.px < 200) down |= KEY_B;   // the B Back prompt
                 if (tiles) {
                     int i = tileAt(first, rowCount, t.px, t.py);
@@ -724,35 +848,24 @@ int main(int argc, char* argv[]) {
         }
         if (activate >= 0 && !rows[activate].enabled) activate = -1;
 
-        if (!jobs.empty()) {
-            Job j = jobs.front();
+        if (jobThread && !jc.busy) finishJob();
+        if (!jobThread && !jobs.empty() && jobs.front() == Job::Restore &&
+            (titleSel < 1 || titleSel > (int)titles.size() || jobSlot >= (int)backups.size())) {
+            jobs.erase(jobs.begin());   // the lists it pointed into changed before it started
+            snprintf(pageMsg, sizeof(pageMsg), "Restore dropped, open the backup again");
+        }
+        if (!jobThread && !jobs.empty()) {
+            jc.kind = jobs.front();
             jobs.erase(jobs.begin());
-            if (j == Job::Sync) {
-                syncSaves(syncMsg, sizeof(syncMsg));
-                if (page == Page::Saves) titles = saveTitles();
-            } else if (j == Job::Restore) {
-                const SaveTitle& t = titles[titleSel - 1];
-                restoreBackup(t, backups[jobSlot], pageMsg, sizeof(pageMsg));
-                backups = saveBackups(t);
-                if (page == Page::Backups) selected = 0;   // the copy it replaced, now the newest
-            } else if (j == Job::Inbox) {
-                installInbox(inboxMsg, sizeof(inboxMsg));
-            } else if (j == Job::Clock) {
-                clockSync(clockMsg, sizeof(clockMsg));
-                if (checkAfterClock) { checkAfterClock = false; queue(Job::Check); }
-            } else if (j == Job::Radio) {
-                if (wifiRadio(!radioOn, pageMsg, sizeof(pageMsg))) radioOn = !radioOn;
-            } else if (!netUp) {
-                snprintf(updateMsg, sizeof(updateMsg), "HTTP service unavailable");
-            } else if (j == Job::Check) {
-                checkUpdate(updateMsg, sizeof(updateMsg));
-                ftp_log("update check: %s", updateMsg);
-            } else if (runUpdate(updateMsg, sizeof(updateMsg)) != UpdateResult::Installed) {
-                ftp_log("update: %s", updateMsg);
-            } else {
-                aptSetChainloaderToSelf();   // relaunch into the new build on exit
-                quit = true;
-            }
+            if (jc.kind == Job::Restore) { jc.title = titles[titleSel - 1]; jc.backup = backups[jobSlot]; }
+            jc.netUp = netUp;
+            jc.radioOn = radioOn;
+            jc.busy = true;
+            s32 prio = 0x30;
+            svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+            // Below FTP and the tunnel (prio + 1): equal priorities never preempt each other on a core.
+            jobThread = threadCreate(runJob, nullptr, 0x20000, prio + 2, -1, false);
+            if (!jobThread) { runJob(nullptr); afterJob(); }   // no thread to be had: run it here
         }
 
         u64 title = 0;
@@ -781,7 +894,7 @@ int main(int argc, char* argv[]) {
             apps = appTitles();
             selected = scroll = 0;
             confirmRow = -1;
-        } else if (page == Page::Titles && mainAct < 0 && activate >= 0 && activate < (int)apps.size() && jobs.empty()) {
+        } else if (page == Page::Titles && mainAct < 0 && activate >= 0 && activate < (int)apps.size() && jobs.empty() && !jobThread) {
             if (confirmRow != activate) {
                 confirmRow = activate;
                 snprintf(pageMsg, sizeof(pageMsg), "A again uninstalls %.40s", apps[activate].name);
@@ -791,7 +904,7 @@ int main(int argc, char* argv[]) {
                 apps = appTitles();
                 if (selected >= (int)apps.size()) selected = apps.empty() ? 0 : apps.size() - 1;
             }
-        } else if (page == Page::Backups && activate >= 0 && jobs.empty()) {
+        } else if (page == Page::Backups && activate >= 0 && jobs.empty() && !jobThread) {
             if (confirmRow != activate) {
                 confirmRow = activate;
                 snprintf(pageMsg, sizeof(pageMsg), "A again restores this over the console's %s", backups[activate].ext ? "extdata" : "save");
@@ -825,6 +938,7 @@ int main(int argc, char* argv[]) {
             pageMsg[0] = 0;
         }
         if (mainAct == ITEM_BROADCAST) {
+            waitJob();
             syncSaves(syncMsg, sizeof(syncMsg));
             s.fault = armBroadcast();
             if (!s.fault) { s.state = State::Armed; led_broadcast(LED_BROADCAST_WAIT); }
@@ -870,12 +984,14 @@ int main(int argc, char* argv[]) {
             // pending and land in whatever title starts next.
             u64 self = 0;
             APT_GetProgramID(&self);
+            waitJob();
             syncSaves(syncMsg, sizeof(syncMsg));
             s.fault = title == self ? nullptr : armBroadcast();
             if (title != self) ftp_log("arm: %s", s.fault ? s.fault : "ok");
             if (!s.fault) { if (title != self) led_broadcast(LED_BROADCAST_WAIT); aptSetChainloader(title, media); quit = true; }
         } else if (req == SITE_FETCH) {
             char m[96];
+            waitJob();
             bool ok = netUp && installCia(site_text(0), m, sizeof(m));
             if (!netUp) snprintf(m, sizeof(m), "HTTP service unavailable");
             ftp_log("fetch %s: %s", site_text(0), ok ? "installed" : m);
@@ -886,6 +1002,7 @@ int main(int argc, char* argv[]) {
             else ftp_log("wifi: %s", m);
         } else if (req == SITE_UNINSTALL) {
             char m[96];
+            waitJob();
             uninstallTitle(title, m, sizeof(m));
             ftp_log("%s", m);
             if (page == Page::Titles) { apps = appTitles(); selected = 0; confirmRow = -1; }
@@ -902,7 +1019,7 @@ int main(int argc, char* argv[]) {
             if (frame % 300 == 0) pollPower(s);
             s.rate = s.ftp.xfer && s.ftp.xfer_done > lastDone ? s.ftp.xfer_done - lastDone : 0;
             lastDone = s.ftp.xfer ? s.ftp.xfer_done : 0;
-            if (s.ip && !checked && jobs.empty()) {
+            if (s.ip && !checked && jobs.empty() && !jobThread) {
                 checked = true;
                 if (clockWrong()) { checkAfterClock = true; snprintf(clockMsg, sizeof(clockMsg), "Clock wrong, asking pool.ntp.org"); queue(Job::Clock); }
                 else queue(Job::Check);
@@ -973,8 +1090,11 @@ int main(int argc, char* argv[]) {
     }
 
     if (site_light_is_off()) site_set_light(false);
+    waitJob();
     if (connThread) { threadJoin(connThread, U64_MAX); threadFree(connThread); }
     // Before ftp_stop: the tunnel's local connections are FTP sessions, and no thread may touch a socket after socExit.
+    if (irSock >= 0) close(irSock);
+    ptmuExit();
     tunnel_stop();
     bool ftpClear = ftp_stop();
     wifiExit();

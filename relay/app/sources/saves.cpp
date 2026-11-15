@@ -1,5 +1,6 @@
 #include <3ds.h>
 #include <dirent.h>
+#include <malloc.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,10 +31,22 @@ enum Kind { SAVE, EXT, KINDS };
 static const char* SUF[KINDS] = { "sav", "ext" };
 static const char* KIND_NAME[KINDS] = { "save", "extdata" };
 static const int KEEP = 10;
-// Whole archive is held in memory up to three times (files, pack, card copy); Old 3DS apps get ~64 MB.
-static const size_t MAX_BYTES = 8u << 20;
+// A sync holds at most two packs at once, the console's and the card's; files are read straight into the
+// pack and unpacked as views into it. No fixed size limit: each big buffer is checked against the heap
+// left, less HEAP_RESERVE for FTP, the tunnel and the menu. new on an exhausted heap aborts the app.
+static const size_t HEAP_RESERVE = 4u << 20;
 
-struct SaveFile { std::string path; std::vector<u8> data; };
+extern "C" u32 __ctru_heap_size;
+static size_t heapFree() {
+    struct mallinfo m = mallinfo();
+    return __ctru_heap_size - m.arena + m.fordblks;
+}
+static bool fits(size_t n) { size_t f = heapFree(); return f > HEAP_RESERVE && n <= f - HEAP_RESERVE; }
+
+void logHeap() { ftp_log("heap %u MB free", (unsigned)(heapFree() >> 20)); }
+
+// A file inside a pack: data points into the pack buffer, which must outlive it.
+struct SaveFile { std::string path; const u8* data; u32 size; };
 
 static u64 fnv(const std::vector<u8>& b) {
     u64 h = 0xcbf29ce484222325ULL;
@@ -50,21 +63,32 @@ static FS_Path utf16Path(const std::string& p, std::vector<u16>& buf) {
 }
 
 
-// Extdata id is the unique id for nearly every title. TODO(later): a few share or move theirs;
-// those sync nothing until an override table is added here.
-static u32 extId(u64 tid) { return (u32)tid >> 8; }
+// Extdata id from the title's exheader through AM; the unique id when AM cannot say, which is the id
+// nearly every title uses. A title with no extdata answers 0.
+static u64 extId(u64 tid, FS_MediaType media) {
+    u64 id = 0;
+    if (R_SUCCEEDED(amInit())) {
+        if (R_FAILED(AM_GetTitleExtDataId(&id, media, tid))) id = 0;
+        amExit();
+        if (id) return id;
+    }
+    return (u32)tid >> 8;
+}
 
 static bool openArchive(u64 tid, FS_MediaType media, Kind k, FS_Archive* arch) {
     if (k == SAVE) {
         u32 path[3] = { media, (u32)tid, (u32)(tid >> 32) };
         return R_SUCCEEDED(FSUSER_OpenArchive(arch, ARCHIVE_USER_SAVEDATA, (FS_Path){ PATH_BINARY, 12, path }));
     }
-    u32 path[3] = { MEDIATYPE_SD, extId(tid), 0 };
+    u64 id = extId(tid, media);
+    u32 path[3] = { MEDIATYPE_SD, (u32)id, (u32)(id >> 32) };
     return R_SUCCEEDED(FSUSER_OpenArchive(arch, ARCHIVE_EXTDATA, (FS_Path){ PATH_BINARY, 12, path }));
 }
 
-// dir is "" for the root or "a/b"; files come out as "a/b/name". False past MAX_BYTES, total says so.
-static bool readTree(FS_Archive arch, const std::string& dir, std::vector<SaveFile>& out, size_t& total) {
+struct TreeFile { std::string path; u64 size; };
+
+// dir is "" for the root or "a/b"; files come out as "a/b/name" with their sizes, nothing read yet.
+static bool listTree(FS_Archive arch, const std::string& dir, std::vector<TreeFile>& out) {
     std::vector<u16> pb;
     Handle d;
     if (R_FAILED(FSUSER_OpenDirectory(&d, arch, utf16Path("/" + dir, pb)))) return false;
@@ -78,37 +102,46 @@ static bool readTree(FS_Archive arch, const std::string& dir, std::vector<SaveFi
         utf16_to_utf8((u8*)name, e.name, sizeof(name) - 1);
         std::string rel = dir.empty() ? name : dir + "/" + name;
         if (e.attributes & FS_ATTRIBUTE_DIRECTORY) {
-            if (!readTree(arch, rel, out, total)) { ok = false; break; }
+            if (!listTree(arch, rel, out)) { ok = false; break; }
             continue;
         }
-        Handle f;
-        if (R_FAILED(FSUSER_OpenFile(&f, arch, utf16Path("/" + rel, pb), FS_OPEN_READ, 0))) { ok = false; break; }
-        u64 size = 0;
-        FSFILE_GetSize(f, &size);
-        if ((total += size) > MAX_BYTES) { FSFILE_Close(f); ok = false; break; }
-        SaveFile sf{ rel, std::vector<u8>(size) };
-        u32 rd = 0;
-        Result r = size ? FSFILE_Read(f, &rd, 0, sf.data.data(), size) : 0;
-        FSFILE_Close(f);
-        if (R_FAILED(r) || rd != size) { ok = false; break; }
-        out.push_back(std::move(sf));
+        out.push_back({ rel, e.fileSize });
     }
     FSDIR_Close(d);
     return ok;
 }
 
-static std::vector<u8> pack(std::vector<SaveFile>& files) {
-    std::sort(files.begin(), files.end(), [](const SaveFile& a, const SaveFile& b) { return a.path < b.path; });
-    std::vector<u8> out;
-    auto put = [&](u32 v, int n) { for (int i = 0; i < n; i++) out.push_back(v >> (8 * i)); };
+enum class Read { Ok, Empty, Failed, TooBig };
+
+// The whole archive as one pack, files sorted by path and read straight into it. need: the pack's size.
+static Read readPack(FS_Archive arch, std::vector<u8>& out, size_t& need) {
+    std::vector<TreeFile> files;
+    if (!listTree(arch, "", files)) return Read::Failed;
+    if (files.empty()) return Read::Empty;
+    std::sort(files.begin(), files.end(), [](const TreeFile& a, const TreeFile& b) { return a.path < b.path; });
+    need = 2;
+    for (auto& f : files) need += 2 + f.path.size() + 4 + f.size;
+    // Room for this pack and a card copy of about the same size.
+    if (!fits(2 * need)) return Read::TooBig;
+    out.resize(need);
+    size_t i = 0;
+    auto put = [&](u32 v, int n) { for (int k = 0; k < n; k++) out[i++] = v >> (8 * k); };
+    std::vector<u16> pb;
     for (auto& f : files) {
         put(f.path.size(), 2);
-        out.insert(out.end(), f.path.begin(), f.path.end());
-        put(f.data.size(), 4);
-        out.insert(out.end(), f.data.begin(), f.data.end());
+        memcpy(&out[i], f.path.data(), f.path.size());
+        i += f.path.size();
+        put(f.size, 4);
+        Handle h;
+        if (R_FAILED(FSUSER_OpenFile(&h, arch, utf16Path("/" + f.path, pb), FS_OPEN_READ, 0))) return Read::Failed;
+        u32 rd = 0;
+        Result r = f.size ? FSFILE_Read(h, &rd, 0, &out[i], f.size) : 0;
+        FSFILE_Close(h);
+        if (R_FAILED(r) || rd != f.size) return Read::Failed;
+        i += f.size;
     }
     put(0, 2);
-    return out;
+    return Read::Ok;
 }
 
 static bool unpack(const u8* b, u32 len, std::vector<SaveFile>& out) {
@@ -127,7 +160,7 @@ static bool unpack(const u8* b, u32 len, std::vector<SaveFile>& out) {
         std::string path((const char*)b + i, n);
         i += n;
         if (!get(4, &size) || size > len - i || path[0] == '/' || path.find("..") != std::string::npos) return false;
-        out.push_back({ path, std::vector<u8>(b + i, b + i + size) });
+        out.push_back({ path, b + i, size });
         i += size;
     }
 }
@@ -165,13 +198,12 @@ static bool writeArchive(u64 tid, FS_MediaType media, Kind k, const std::vector<
         FS_Path fp = utf16Path("/" + p, pb);
         if (k == EXT) FSUSER_DeleteFile(arch, fp);   // missing is fine
         Handle f;
-        if (R_FAILED(FSUSER_CreateFile(arch, fp, 0, files[i].data.size())) ||
+        if (R_FAILED(FSUSER_CreateFile(arch, fp, 0, files[i].size)) ||
             R_FAILED(FSUSER_OpenFile(&f, arch, fp, FS_OPEN_WRITE, 0))) { ok = false; break; }
         u32 w = 0;
-        Result r = files[i].data.empty() ? 0
-                 : FSFILE_Write(f, &w, 0, files[i].data.data(), files[i].data.size(), FS_WRITE_FLUSH);
+        Result r = !files[i].size ? 0 : FSFILE_Write(f, &w, 0, files[i].data, files[i].size, FS_WRITE_FLUSH);
         FSFILE_Close(f);
-        if (R_FAILED(r) || w != files[i].data.size()) ok = false;
+        if (R_FAILED(r) || w != files[i].size) ok = false;
     }
     if (ok && k == SAVE) ok = R_SUCCEEDED(FSUSER_ControlArchive(arch, ARCHIVE_ACTION_COMMIT_SAVE_DATA, nullptr, 0, nullptr, 0));
     FSUSER_CloseArchive(arch);
@@ -216,7 +248,7 @@ static bool readFile(const char* path, std::vector<u8>& out) {
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (n < 0 || (size_t)n > 2 * MAX_BYTES) { fclose(f); return false; }   // no pack is larger
+    if (n < 0 || !fits(n)) { fclose(f); if (n > 0) ftp_log("%s: %ld bytes, no memory for it", path, n); return false; }
     out.resize(n);
     bool ok = fread(out.data(), 1, out.size(), f) == out.size();
     fclose(f);
@@ -325,15 +357,16 @@ enum class Outcome { Same, Pushed, Pulled, NoSave, TooBig, Failed };
 static Outcome syncOne(u64 tid, FS_MediaType media, Kind k) {
     FS_Archive arch;
     if (!openArchive(tid, media, k, &arch)) return Outcome::NoSave;
-    std::vector<SaveFile> files;
-    size_t total = 0;
-    bool read = readTree(arch, "", files, total);
+    std::vector<u8> local;
+    size_t need = 0;
+    Read rd = readPack(arch, local, need);
     FSUSER_CloseArchive(arch);
-    if (total > MAX_BYTES) { ftp_log("%s %016llX over %u MB, skipped", KIND_NAME[k], tid, MAX_BYTES >> 20); return Outcome::TooBig; }
-    if (!read) { ftp_log("%s %016llX unreadable", KIND_NAME[k], tid); return Outcome::Failed; }
-    if (files.empty()) return Outcome::NoSave;
-    std::vector<u8> local = pack(files);
-    files = {};
+    if (rd == Read::TooBig) {
+        ftp_log("%s %016llX %u KB, no memory for it, skipped", KIND_NAME[k], tid, (unsigned)(need >> 10));
+        return Outcome::TooBig;
+    }
+    if (rd == Read::Failed) { ftp_log("%s %016llX unreadable", KIND_NAME[k], tid); return Outcome::Failed; }
+    if (rd == Read::Empty) return Outcome::NoSave;
     u64 lh = fnv(local), last = lastHash(tid, k);
     const char* kn = KIND_NAME[k];
 
@@ -362,6 +395,8 @@ static Outcome syncOne(u64 tid, FS_MediaType media, Kind k) {
     }
     std::vector<u8> remote;
     bool have = readFile(store.c_str(), remote);
+    // A store copy that is there but did not read must not be overwritten unseen.
+    if (!have && exists(store)) { ftp_log("%s %016llX: store copy unreadable here, skipped", kn, tid); return Outcome::Failed; }
     u64 rh = have ? fnv(remote) : 0;
 
     if (have && rh == lh) { if (last != lh) setLast(tid, k, lh); return Outcome::Same; }

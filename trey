@@ -20,8 +20,9 @@
   trey touch <x> <y> [-t ms]     tap bottom screen, 320x240
   trey home | trey power         HOME button, power button (power menu)
 
-Relay must be open on the 3DS. press/touch/home/power need Rosalina > Miscellaneous options
-> InputRedirection started; it resets every boot. TREY_HOST overrides the address.
+Relay must be open on the 3DS. press/touch drive Relay's pages directly; outside Relay, and for
+home/power, they need Rosalina > Miscellaneous options > InputRedirection started; it resets every
+boot. TREY_HOST overrides the address.
 """
 import ftplib
 import getpass

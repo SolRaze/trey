@@ -10,6 +10,9 @@
 // Blocks; msg gets the counts for the screen. False when any title failed (details in the FTP log).
 bool syncSaves(char* msg, size_t cap);
 
+// Free heap to the FTP log, as a sync's size budget sees it.
+void logHeap();
+
 // Syncs the title's save now. False when the store does not hold it afterwards: unreadable, over the
 // size limit, or the card write failed (details in the FTP log). True when there is no save.
 bool saveStored(u64 tid, u8 media);

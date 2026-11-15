@@ -31,8 +31,9 @@ port (any free port when that one is taken), rewrites the reply to point there, 
 client's connect sends OPEN for the console's port. Data streams are tunnel streams like
 control; nothing on the console changes.
 
-Public entry: Tailscale Funnel, `tailscale funnel --bg --tls-terminated-tcp=443 tcp://127.0.0.1:8741`,
-off by the same command plus `off`. Funnel ports 443, 8443, 10000 only; needs MagicDNS, HTTPS certs
+Public entry: Tailscale Funnel, `tailscale funnel --bg --tls-terminated-tcp=10000 tcp://127.0.0.1:8741`,
+off by the same command plus `off`. Funnel ports 443, 8443, 10000 only; a Funnel port also binds
+knave's tailnet address, so 443 would take every *.knave site from NPM and 8443 is atlas's fallback; needs MagicDNS, HTTPS certs
 and the `funnel` nodeAttr; tailscaled terminates TLS with the knave.<tailnet>.ts.net certificate,
 which the console checks against its embedded roots. Bandwidth is capped by Tailscale, unstated.
 Anyone on the internet reaches the tunnel port: only an AUTH within 15 s keeps a connection.

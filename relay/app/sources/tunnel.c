@@ -5,7 +5,7 @@
  *
  * sdmc:/3ds/relay/tunnel, one "key value" per line; the file existing turns the tunnel on:
  *   host   broker name or address (Funnel: knave.<tailnet>.ts.net)
- *   port   default 443
+ *   port   default 10000, the broker's Funnel port
  *   secret shared with the broker, 16 bytes or more; never logged, never shown
  *   pin    optional, sha256 hex of the broker's certificate DER: replaces the CA and name check,
  *          for a self-signed broker; without it the chain must verify against certs/cacert.pem
@@ -118,7 +118,7 @@ static bool load_conf(void) {
     FILE *f = fopen(CONF_PATH, "r");
     if (!f) return false;
     memset(&conf, 0, sizeof(conf));
-    conf.port = 443;
+    conf.port = 10000;
     char line[256];
     while (fgets(line, sizeof(line), f)) {
         line[strcspn(line, "\r\n")] = '\0';

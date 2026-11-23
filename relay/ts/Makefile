@@ -59,7 +59,7 @@ CTR_ARCH := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 CTR_CFLAGS := -DTS_PORT -D__3DS__ -std=gnu11 -g -O2 -mword-relocations -ffunction-sections \
               -Wall -Wno-unused-parameter -Wno-unused-function $(CTR_ARCH) \
               $(INC) -I$(DKP)/portlibs/3ds/include -I$(DKP)/libctru/include
-CTR_OBJ := $(patsubst %.c,$(CTR_DIR)/%.o,$(subst $(UP)/,up/,$(SRC) port/os_ctru.c port/node.c))
+CTR_OBJ := $(patsubst %.c,$(CTR_DIR)/%.o,$(subst $(UP)/,up/,$(SRC) port/os_ctru.c port/node.c port/serve.c))
 
 ctr: $(CTR_DIR)/libts.a
 

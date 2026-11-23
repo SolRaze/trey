@@ -3,7 +3,8 @@
  *   ts_node_line   one status line for the screen and SITE STAT
  *   ts_node_stop   before socExit
  * Files: <dir>/../tskey auth key (`key tskey-...` or bare, never logged) | <dir>/ node keys and
- * peer cache | <dir>/ts.log every engine line, appended. UDP 9000 echoes, the reachability probe. */
+ * peer cache | <dir>/ts.log every engine line, appended. UDP 9000 echoes, the reachability probe.
+ * serve.c puts ftp.c on the tailnet address: 100.x:5000, PASV 5001-5100. */
 #include <3ds.h>
 
 #include "microlink.h"
@@ -19,13 +20,19 @@
 #include <sys/stat.h>
 
 int ts_ca_set(const unsigned char *pem, size_t len);
+int serve_start(u16 lo, u16 hi);
+void serve_stop(void);
+void serve_set_ip(const char *dotted);
+
+#define FTP_LO 5000   /* ftp.c: control, then PASV_FIRST 5001 .. 5100 */
+#define FTP_HI 5100
 
 static LightLock log_lock;
 static FILE *log_file;
 static microlink_t *ml;
 static microlink_udp_socket_t *echo;
 static char *key;   /* microlink keeps the pointer and re-reads it on every registration */
-static bool tcpip_up, sslc_up;
+static bool tcpip_up, sslc_up, ip_set;
 static char why[48] = "off";
 
 static void log_line(const char *line) {
@@ -97,6 +104,10 @@ int ts_node_start(const char *dir, const char *key_path, const char *name) {
         snprintf(why, sizeof why, "start failed");
         goto fail;
     }
+    int n = serve_start(FTP_LO, FTP_HI);
+    char l[40];
+    snprintf(l, sizeof l, "serving %d ports", n);
+    log_line(l);
     snprintf(why, sizeof why, "joining");
     return 0;
 fail:
@@ -112,12 +123,15 @@ bool ts_node_line(char *out, size_t cap) {
     if (!microlink_is_connected(ml)) { snprintf(out, cap, "joining"); return false; }
     char a[16];
     microlink_ip_to_str(microlink_get_vpn_ip(ml), a);
+    if (!ip_set) { serve_set_ip(a); ip_set = true; }
     if (!echo && (echo = microlink_udp_create(ml, 9000))) microlink_udp_set_rx_callback(echo, on_udp, NULL);
     snprintf(out, cap, "%s %d peers", a, microlink_get_peer_count(ml));
     return true;
 }
 
 void ts_node_stop(void) {
+    serve_stop();
+    ip_set = false;
     if (ml) {
         log_line("node stop");
         microlink_stop(ml);

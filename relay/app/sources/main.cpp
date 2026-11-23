@@ -609,9 +609,9 @@ int main(int argc, char* argv[]) {
         site_init(true);
         socOk = ftp_start(prio + 1, "trey relay") == 0;
         if (socOk) tunnel_start(prio + 1);
-        if (socOk) ts_node_start("sdmc:/3ds/relay/ts", "sdmc:/3ds/relay/tskey", "trey");   // no key file = off
     }
     coreStart();   // after ftp_start: its outcome goes to the FTP log
+    tsStart();
     s.state = socOk ? State::Starting : State::NoSockets;
     bool netUp = netInit();
     wifiInit();
@@ -1106,7 +1106,6 @@ int main(int argc, char* argv[]) {
     if (irSock >= 0) close(irSock);
     ptmuExit();
     tunnel_stop();
-    ts_node_stop();
     bool ftpClear = ftp_stop();
     wifiExit();
     if (netUp) netExit();

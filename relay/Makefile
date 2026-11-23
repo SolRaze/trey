@@ -21,6 +21,8 @@ all:
 	$(MAKE) -C core
 	cp core/core.cxi app/data/core.bin
 	$(MAKE) -C ts ctr
+	$(MAKE) -C tsmod
+	cp tsmod/tsmod.cxi app/data/tsmod.bin
 	$(MAKE) -C app cia $(VERSIONS)
 
 # Uploads this build as the latest GitHub release of SolRaze/trey, where the app's updater looks
@@ -34,6 +36,7 @@ release: all
 clean:
 	$(MAKE) -C plugin clean
 	$(MAKE) -C core clean
+	$(MAKE) -C tsmod clean
 	$(MAKE) -C app clean
 	rm -rf app/data
 

@@ -2,3 +2,5 @@ images/logo.pdn
 .vscode/
 common/build.h
 app/certs/
+ts/build-host/
+ts/build-3ds/

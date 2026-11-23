@@ -9,8 +9,10 @@ CFLAGS := -g -Os -std=gnu11 -Wall -Wextra -mword-relocations -ffunction-sections
 LDFLAGS := -specs=3dsx.specs -g $(ARCH) -Wl,--gc-sections,-Map,core.map -L$(CTRU)/lib
 SRC    := $(wildcard source/*.c)
 
+# No -nocodepadding: Luma's loader maps ro and data at page offsets of the decompressed .code;
+# packed segments shift them and every rodata string and data value reads wrong.
 core.cxi: core.elf core.rsf
-	makerom -f ncch -rsf core.rsf -nocodepadding -o $@ -elf $<
+	makerom -f ncch -rsf core.rsf -o $@ -elf $<
 
 core.elf: $(SRC) $(wildcard source/*.h) ../common/build.h
 	$(CC) $(CFLAGS) $(LDFLAGS) $(SRC) -lctru -lm -o $@

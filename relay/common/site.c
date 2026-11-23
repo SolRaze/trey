@@ -142,6 +142,63 @@ static int site_stat(char *out, size_t cap) {
     return 200;
 }
 
+/* Attaches to the core as a debugger, reports each thread's pc, lr, sp and the words on its
+ * stack that point into code (return-address candidates, map with addr2line on core.elf), then
+ * continues and detaches: the core keeps running. Needs EnableForceDebug in core.rsf. */
+static int site_core(const char *arg, char *out, size_t cap) {
+    u32 pid;
+    if (!core_pid(&pid)) { snprintf(out, cap, "core absent"); return 550; }
+    Handle dbg;
+    Result r = svcDebugActiveProcess(&dbg, pid);
+    if (R_FAILED(r)) { snprintf(out, cap, "attach failed %08lX", r); return 550; }
+    /* attach events: process, threads, then the attach break; the process is stopped after it */
+    DebugEventInfo ev;
+    size_t n = snprintf(out, cap, "pid %lu\nevents:", pid);
+    for (int i = 0; i < 32 && R_SUCCEEDED(svcGetProcessDebugEvent(&ev, dbg)); i++) {
+        n += snprintf(out + n, cap - n, " %d/%lu", ev.type, ev.thread_id);
+        if (ev.type == DBGEVENT_EXCEPTION)
+            n += snprintf(out + n, cap - n, "(exc %d addr %08lX)", ev.exception.type, ev.exception.address);
+        if (ev.type == DBGEVENT_EXCEPTION && ev.exception.type == EXCEVENT_ATTACH_BREAK) break;
+        if (ev.flags & 1) svcContinueDebugEvent(dbg, 0);
+    }
+    MemInfo mi;
+    PageInfo pi;
+    if (R_SUCCEEDED(svcQueryDebugProcessMemory(&mi, &pi, dbg, 0x100000)))
+        n += snprintf(out + n, cap - n, "\ncode base %08lX size %lX perm %lX state %lX", mi.base_addr, mi.size, mi.perm, mi.state);
+    if (R_SUCCEEDED(svcQueryMemory(&mi, &pi, 0x100000)))
+        n += snprintf(out + n, cap - n, "\nrelay code base %08lX size %lX perm %lX state %lX", mi.base_addr, mi.size, mi.perm, mi.state);
+    s64 v;
+    Handle ph;
+    if (R_SUCCEEDED(svcOpenProcess(&ph, pid))) {
+        if (R_SUCCEEDED(svcGetProcessInfo(&v, ph, 0))) n += snprintf(out + n, cap - n, "\nused %lld", v);
+        svcCloseHandle(ph);
+    }
+    u32 code[4];
+    if (R_SUCCEEDED(svcReadProcessMemory(code, dbg, 0x100000, sizeof code)))
+        n += snprintf(out + n, cap - n, "\ncode %08lX %08lX %08lX %08lX", code[0], code[1], code[2], code[3]);
+    Handle proc;
+    u32 tids[8];
+    s32 nt = 0;
+    if (R_SUCCEEDED(svcOpenProcess(&proc, pid))) { svcGetThreadList(&nt, tids, 8, proc); svcCloseHandle(proc); }
+    for (s32 t = 0; t < nt && n < cap; t++) {
+        ThreadContext c;
+        r = svcGetDebugThreadContext(&c, dbg, tids[t], THREADCONTEXT_CONTROL_CPU_REGS);
+        if (R_FAILED(r)) { n += snprintf(out + n, cap - n, "\nthread %lu context failed %08lX", tids[t], r); continue; }
+        CpuRegisters *g = &c.cpu_registers;
+        n += snprintf(out + n, cap - n, "\nthread %lu pc %08lX lr %08lX sp %08lX cpsr %08lX r0 %08lX r1 %08lX",
+                      tids[t], g->pc, g->lr, g->sp, g->cpsr, g->r[0], g->r[1]);
+        u32 stack[128];
+        if (R_FAILED(svcReadProcessMemory(stack, dbg, g->sp, sizeof stack))) continue;
+        n += snprintf(out + n, cap - n, "\n stack code words:");
+        for (int i = 0, k = 0; i < 128 && k < 24 && n < cap; i++)
+            if (stack[i] >= 0x100000 && stack[i] < 0x200000) { n += snprintf(out + n, cap - n, " %08lX", stack[i]); k++; }
+    }
+    if (n >= cap) out[cap - 1] = '\0';
+    while (R_SUCCEEDED(svcContinueDebugEvent(dbg, 0)) && R_SUCCEEDED(svcGetProcessDebugEvent(&ev, dbg))) {}
+    svcCloseHandle(dbg);
+    return 200;
+}
+
 bool site_set_light(bool off) {
     if (R_FAILED(gspLcdInit())) return false;
     Result r = off ? GSPLCD_PowerOffBacklight(GSPLCD_SCREEN_BOTH) : GSPLCD_PowerOnBacklight(GSPLCD_SCREEN_BOTH);
@@ -308,6 +365,7 @@ static const char HELP[] =
     "SITE PLAY        plugin only: leave the plugin screen, boot the game\n"
     "SITE SYNC | SITE INBOX | SITE UPDATE  Relay app only: the menu rows, result in SITE LOG\n"
     "SITE CLOCK       Relay app only: set the clock from NTP, result in SITE LOG\n"
+    "SITE CORE        Relay app only: core threads, pc lr sp and stack code words\n"
     "SITE REBOOT | SITE POWEROFF\n"
     "STOR /install/<name>.cia  Relay app only: installs, nothing written to the card";
 
@@ -323,6 +381,10 @@ static int site(char *arg, char *out, size_t cap) {
     if (!strcasecmp(arg, "LAUNCH")) return site_launch(rest, out, cap);
     if (!strcasecmp(arg, "FETCH")) return site_fetch(rest, out, cap);
     if (!strcasecmp(arg, "WIFI")) return site_wifi(rest, out, cap);
+    if (!strcasecmp(arg, "CORE")) {
+        if (!is_app) { snprintf(out, cap, "In a game; needs the Relay app"); return 550; }
+        return site_core(rest, out, cap);
+    }
     if (!strcasecmp(arg, "UNINSTALL")) return site_uninstall(rest, out, cap);
     if (!strcasecmp(arg, "REBOOT")) return request(SITE_REBOOT, "Rebooting", out, cap);
     if (!strcasecmp(arg, "POWEROFF")) return request(SITE_POWEROFF, "Powering off", out, cap);

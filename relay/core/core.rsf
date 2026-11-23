@@ -24,7 +24,9 @@ Option:
 AccessControlInfo:
   IdealProcessor                : 1
   AffinityMask                  : 3
-  Priority                      : 48
+  # Under 16: OTHER-category threads at 16+ are paused by core1 preemption while an app runs,
+  # and the core starts after one. OTHER reslimit floor is 4. The main loop must block.
+  Priority                      : 15
   DisableDebug                  : false
   EnableForceDebug              : true
   CanWriteSharedPage            : false

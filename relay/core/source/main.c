@@ -46,6 +46,7 @@ void __appInit(void) {
     if (R_FAILED(r)) svcBreak(USERBREAK_PANIC);
     if (R_FAILED(fsInit())) svcBreak(USERBREAK_PANIC);
     archiveMountSdmc();
+    chdir("sdmc:/");   /* default device: bare "/3ds/..." paths resolve to sdmc */
 }
 
 void __appExit(void) {

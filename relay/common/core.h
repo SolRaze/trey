@@ -20,7 +20,7 @@ static inline u32 core_boot_id(void) {
 
 /* Process names come from Luma's svcGetProcessInfo extension (type 0x10000).
  * Needs svcGetProcessList/svcOpenProcess rights: Relay has them, a game process may not. */
-static inline bool core_running(void) {
+static inline bool core_pid(u32 *pid) {
     u32 pids[64];
     s32 n = 0;
     if (R_FAILED(svcGetProcessList(&n, pids, 64))) return false;
@@ -30,7 +30,9 @@ static inline bool core_running(void) {
         char name[9] = {0};
         svcGetProcessInfo((s64 *)name, h, 0x10000);
         svcCloseHandle(h);
-        if (!strncmp(name, CORE_NAME, 8)) return true;
+        if (!strncmp(name, CORE_NAME, 8)) { if (pid) *pid = pids[i]; return true; }
     }
     return false;
 }
+
+static inline bool core_running(void) { return core_pid(NULL); }

@@ -1,0 +1,44 @@
+diff --git a/components/microlink/components/wireguard_lwip/src/crypto/refc/x25519.c b/components/microlink/components/wireguard_lwip/src/crypto/refc/x25519.c
+index 8f28edd..452a439 100644
+--- a/components/microlink/components/wireguard_lwip/src/crypto/refc/x25519.c
++++ b/components/microlink/components/wireguard_lwip/src/crypto/refc/x25519.c
+@@ -233,7 +233,7 @@ static void x25519_core(fe xs[5], const uint8_t scalar[X25519_BYTES], const uint
+ #if X25519_MEMCPY_PARAMS
+     fe x1i;
+     swapin(x1i,x1);
+-    x1 = (const uint8_t *)x1;
++    x1 = (const uint8_t *)x1i;
+ #endif
+     limb_t swap = 0;
+     limb_t *x2 = xs[0],*x3=xs[2],*z3=xs[3];
+diff --git a/components/microlink/src/ml_wg_mgr.c b/components/microlink/src/ml_wg_mgr.c
+index 1d7cea6..e834de7 100644
+--- a/components/microlink/src/ml_wg_mgr.c
++++ b/components/microlink/src/ml_wg_mgr.c
+@@ -283,6 +283,16 @@ static err_t wg_udp_output_cb(uint32_t dest_ip, uint16_t dest_port,
+     microlink_t *ml = (microlink_t *)ctx;
+     if (!ml) return ERR_CONN;
+ 
++#ifdef TS_PORT
++    /* Underlay is the OS socket API: direct WireGuard leaves on the magicsock socket
++     * it arrived on, never on an lwIP pcb (lwIP here only carries tunnel traffic). */
++    if (ml->disco_sock4 < 0) return ERR_CONN;
++    struct sockaddr_in to = { .sin_family = AF_INET, .sin_port = htons(dest_port) };
++    to.sin_addr.s_addr = dest_ip;   /* already network byte order */
++    return ml_sendto(ml->disco_sock4, data, len, 0, (struct sockaddr *)&to, sizeof to) == (ssize_t)len
++           ? ERR_OK : ERR_RTE;
++#endif
++
+     /* Log WG packets sent via direct UDP */
+     uint32_t ip_host = ntohl(dest_ip);
+     ESP_LOGD(TAG, "WG UDP TX: %d bytes -> %d.%d.%d.%d:%d type=%d",
+@@ -704,7 +714,9 @@ static esp_err_t wg_init_interface(microlink_t *ml) {
+     wireguardif_set_ip_filter(netif, wg_filter_rx_cb, wg_filter_tx_cb, ml);
+ #endif
+     wireguardif_set_udp_output(netif, wg_udp_output_cb, ml);
++#ifndef TS_PORT   /* the pbuf path sends on lwIP; the byte path above covers the port */
+     wireguardif_set_udp_output_pbuf(netif, wg_udp_output_pbuf_cb, ml);
++#endif
+ 
+     /* On cellular AT socket bridge, force all WG output through DERP relay.
+      * AT sockets are TCP-only, so direct UDP is impossible.

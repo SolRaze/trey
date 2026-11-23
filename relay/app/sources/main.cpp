@@ -25,6 +25,7 @@
 #include "ftp.h"
 #include "site.h"
 #include "tunnel.h"
+#include "ts_node.h"
 #include "led.h"
 
 #define SOC_ALIGN      0x1000
@@ -608,6 +609,7 @@ int main(int argc, char* argv[]) {
         site_init(true);
         socOk = ftp_start(prio + 1, "trey relay") == 0;
         if (socOk) tunnel_start(prio + 1);
+        if (socOk) ts_node_start("sdmc:/3ds/relay/ts", "sdmc:/3ds/relay/tskey", "trey");   // no key file = off
     }
     coreStart();   // after ftp_start: its outcome goes to the FTP log
     s.state = socOk ? State::Starting : State::NoSockets;
@@ -1029,6 +1031,12 @@ int main(int argc, char* argv[]) {
         }
         if (s.state != State::Armed) ftp_status(&s.ftp);
         s.tunnel = tunnel_status(s.tunnelLine, sizeof(s.tunnelLine));
+        if (s.tunnel == TUNNEL_OFF) {   // the row shows the Tailscale node while the knave tunnel is off
+            char ts[40];
+            bool up = ts_node_line(ts, sizeof(ts));
+            snprintf(s.tunnelLine, sizeof(s.tunnelLine), "ts %s", ts);
+            s.tunnel = up ? TUNNEL_UP : TUNNEL_WAIT;
+        }
 
         buildRows();
         // Window over the list: the pinned rows, then the part holding the selection.
@@ -1098,6 +1106,7 @@ int main(int argc, char* argv[]) {
     if (irSock >= 0) close(irSock);
     ptmuExit();
     tunnel_stop();
+    ts_node_stop();
     bool ftpClear = ftp_stop();
     wifiExit();
     if (netUp) netExit();

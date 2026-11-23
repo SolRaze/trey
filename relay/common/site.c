@@ -116,6 +116,9 @@ static int site_shot(char *out, size_t cap) {
 
 /* ---- status ---- */
 
+/* port/node.c, linked into the app only; NULL in the plugin. */
+bool ts_node_line(char *out, size_t cap) __attribute__((weak));
+
 static int site_stat(char *out, size_t cap) {
     size_t n = snprintf(out, cap, "mode %s\nbuild v%d.%d.%d %s", is_app ? "relay" : "broadcast",
                         VERSION_MAJOR, VERSION_MINOR, VERSION_REVISION, RELAY_BUILD);
@@ -138,7 +141,12 @@ static int site_stat(char *out, size_t cap) {
     if (R_SUCCEEDED(APT_GetProgramID(&tid)))
         n += snprintf(out + n, cap - n, "\ntitle %016llX", tid);
     n += snprintf(out + n, cap - n, "\nlight %s", light_off ? "off" : "on");
-    if (is_app) snprintf(out + n, cap - n, "\ncore %s", core_running() ? "running" : "absent");
+    if (is_app) n += snprintf(out + n, cap - n, "\ncore %s", core_running() ? "running" : "absent");
+    if (is_app && ts_node_line && n < cap) {
+        char ts[40];
+        ts_node_line(ts, sizeof ts);
+        snprintf(out + n, cap - n, "\nts %s", ts);
+    }
     return 200;
 }
 

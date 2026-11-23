@@ -20,6 +20,7 @@ all:
 	cp plugin/relay.3gx app/data/plugin.bin
 	$(MAKE) -C core
 	cp core/core.cxi app/data/core.bin
+	$(MAKE) -C ts ctr
 	$(MAKE) -C app cia $(VERSIONS)
 
 # Uploads this build as the latest GitHub release of SolRaze/trey, where the app's updater looks

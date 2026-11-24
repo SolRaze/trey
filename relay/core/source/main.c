@@ -1,7 +1,7 @@
 /* Relay core: a sysmodule in the base memory region that outlives Relay, HOME and games.
  *
  * Now: sleep denied while it runs, lid-shut dark (backlights and every LED but Wi-Fi off),
- * docked state, and a status file with the memory, storage and power readout.
+ * docked state, and a status file with the heap, storage and power readout.
  * Started by Relay through pm:app; Luma's loader reads it from CORE_CXI.
  *
  * Constraints: no APT (sysmodules have no applet slot); heap is fixed at HEAP_SIZE out of the
@@ -152,11 +152,8 @@ static void write_status(u64 up_s) {
             lid_shut ? "shut" : "open", docked ? "yes" : "no");
     if (battery <= 100) fprintf(f, "battery %u\n", battery);
     fprintf(f, "sleep_denied %lu\n", sleep_denied);
-    static const struct { MemRegion r; const char *name; } regions[] = {
-        { MEMREGION_APPLICATION, "app" }, { MEMREGION_SYSTEM, "system" }, { MEMREGION_BASE, "base" } };
-    for (int i = 0; i < 3; i++)
-        fprintf(f, "mem_%s %lu %lu\n", regions[i].name,
-                osGetMemRegionFree(regions[i].r), osGetMemRegionSize(regions[i].r));
+    /* No osGetMemRegionFree/Used here: that svcGetSystemInfo walks the region's free list, and a
+     * title starting on the other core rewrites it; the kernel data-aborts. */
     struct mallinfo mi = mallinfo();
     fprintf(f, "heap %u %u\n", mi.uordblks, HEAP_SIZE);
     FS_ArchiveResource res;

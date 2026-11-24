@@ -137,8 +137,7 @@ static void limits(const char *when) {
 int main(void) {
     mkdir(TS_DIR, 0777);
     status(false, "starting");   /* replaces the last boot's file before Relay reads it */
-    note("tsmod %s heap %08lX, system free %lu KB", RELAY_BUILD, heap_res,
-         osGetMemRegionFree(MEMREGION_SYSTEM) / 1024);
+    note("tsmod %s heap %08lX", RELAY_BUILD, heap_res);   /* no region readout: see core write_status */
     limits("limits at start");
     if (R_FAILED(heap_res)) { status(false, "no memory"); return 1; }
 
